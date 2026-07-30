@@ -218,6 +218,8 @@ settings.MapPut("/", async (SettingsDto dto, ClaimsPrincipal principal, PsxDbCon
     s.CostMethod = dto.CostMethod;
     s.IncludeCommission = dto.IncludeCommission;
     s.ManualPricesJson = JsonSerializer.Serialize(dto.ManualPrices ?? new Dictionary<string, decimal>());
+    if (dto.DividendTaxRatePct >= 0 && dto.DividendTaxRatePct <= 100)
+        s.DividendTaxRatePct = dto.DividendTaxRatePct;
     await db.SaveChangesAsync();
     return Results.Ok(SettingsDto.From(s));
 });
@@ -376,11 +378,6 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         error = "Type must be 'deposit', 'withdrawal', or 'dividend'.";
         return false;
     }
-    if (req.Amount <= 0)
-    {
-        error = "Amount must be positive.";
-        return false;
-    }
     if (!DateOnly.TryParse(req.Date, out var date))
     {
         error = "Date is invalid.";
@@ -388,6 +385,10 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
     }
 
     string? symbol = null;
+    decimal amount;
+    decimal? grossAmount = null;
+    decimal? taxRatePct = null;
+
     if (type == CashType.Dividend)
     {
         if (string.IsNullOrWhiteSpace(req.Symbol))
@@ -396,16 +397,46 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
             return false;
         }
         symbol = req.Symbol.Trim().ToUpperInvariant();
+
+        if (req.GrossAmount is not decimal gross || gross <= 0)
+        {
+            error = "Gross amount must be positive.";
+            return false;
+        }
+        var rate = req.TaxRatePct ?? 0;
+        if (rate < 0 || rate > 100)
+        {
+            error = "Tax rate must be between 0 and 100.";
+            return false;
+        }
+
+        // Server computes the NET (post-tax) amount itself - never trusts a
+        // client-supplied Amount for a dividend, so Gross/Rate/Amount can't drift
+        // out of sync with each other.
+        grossAmount = gross;
+        taxRatePct = rate;
+        amount = Math.Round(gross * (1 - rate / 100m), 4, MidpointRounding.AwayFromZero);
+    }
+    else
+    {
+        if (req.Amount is not decimal a || a <= 0)
+        {
+            error = "Amount must be positive.";
+            return false;
+        }
+        amount = a;
     }
 
     entry = new CashEntry
     {
         UserId = userId,
         Type = type,
-        Amount = req.Amount,
+        Amount = amount,
         EntryDate = date,
         Notes = req.Notes,
         Symbol = symbol,
+        GrossAmount = grossAmount,
+        TaxRatePct = taxRatePct,
     };
     return true;
 }
@@ -413,12 +444,13 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 record AuthRequest(string? Username, string? Password);
 record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes);
 record ImportRequest(List<LedgerCreateRequest> Transactions);
-record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices)
+record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct)
 {
     public static SettingsDto From(UserSettings s) => new(
         s.CostMethod,
         s.IncludeCommission,
-        JsonSerializer.Deserialize<Dictionary<string, decimal>>(s.ManualPricesJson) ?? new()
+        JsonSerializer.Deserialize<Dictionary<string, decimal>>(s.ManualPricesJson) ?? new(),
+        s.DividendTaxRatePct
     );
 }
 record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes)
@@ -428,12 +460,12 @@ record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shar
         e.TxDate.ToString("yyyy-MM-dd"), e.Notes
     );
 }
-record CashCreateRequest(string Type, decimal Amount, string Date, string? Notes, string? Symbol = null, bool CreditToCash = true);
-record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId)
+record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null);
+record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct)
 {
     public static CashDto From(CashEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes,
-        e.Symbol, e.LinkedEntryId
+        e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct
     );
 }
 

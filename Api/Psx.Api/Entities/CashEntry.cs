@@ -26,6 +26,16 @@ public class CashEntry
     // Only set (and meaningful) when Type == Dividend — which script paid it.
     public string? Symbol { get; set; }
 
+    // Only set (and meaningful) when Type == Dividend. PSX dividends have withholding
+    // tax deducted at source before the investor ever sees the money - Amount above is
+    // always the NET amount actually received/credited (so every existing balance/pairing
+    // calculation keeps working unchanged); GrossAmount is the pre-tax declared amount,
+    // and TaxRatePct is the rate actually applied to THIS entry (not the live settings
+    // default - stored per-entry so a later change to the default never rewrites history).
+    // Tax paid on this entry = GrossAmount - Amount (derived, not stored separately).
+    public decimal? GrossAmount { get; set; }
+    public decimal? TaxRatePct { get; set; }
+
     // Set ONLY on a synthetic offsetting Withdrawal row created when a dividend was paid
     // directly to the user's bank rather than credited to tracked free cash — points at
     // the paired Dividend row's Id. One-directional: the Dividend row's own LinkedEntryId

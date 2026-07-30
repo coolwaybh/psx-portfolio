@@ -33,6 +33,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
         modelBuilder.Entity<UserSettings>(b =>
         {
             b.HasKey(s => s.UserId);
+            b.Property(s => s.DividendTaxRatePct).HasColumnType("decimal(5,2)");
             b.HasOne(s => s.User)
                 .WithOne(u => u.Settings)
                 .HasForeignKey<UserSettings>(s => s.UserId)
@@ -43,6 +44,8 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
         {
             b.Property(c => c.Type).HasConversion<string>().HasMaxLength(10);
             b.Property(c => c.Amount).HasColumnType("decimal(18,4)");
+            b.Property(c => c.GrossAmount).HasColumnType("decimal(18,4)");
+            b.Property(c => c.TaxRatePct).HasColumnType("decimal(5,2)");
             b.Property(c => c.Symbol).HasMaxLength(20);
             b.HasIndex(c => c.UserId);
             b.HasOne(c => c.User)

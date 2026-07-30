@@ -712,6 +712,13 @@ a{color:var(--accent);text-decoration:none}
       <button class="btn btn-sm btn-primary" onclick="openCashModal()">+ Add Cash Entry</button>
     </div>
   </div>
+  <div class="txlog-filters" style="align-items:center">
+    <span style="font-size:11px;color:var(--txt3)">Dividend tax paid:</span>
+    <input type="date" id="taxReportFrom" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderTaxReport()">
+    <span style="font-size:11px;color:var(--txt3)">to</span>
+    <input type="date" id="taxReportTo" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderTaxReport()">
+    <span id="taxReportTotal" class="method-pill"></span>
+  </div>
   <div class="tbl-wrap">
     <table class="tbl">
       <thead>
@@ -751,10 +758,26 @@ a{color:var(--accent);text-decoration:none}
           <input type="text" id="cfSymbol" class="form-input mono" list="symbolList" placeholder="e.g. OGDC" oninput="this.value=this.value.toUpperCase()">
           <span class="form-error" id="errCfSymbol"></span>
         </div>
-        <div class="form-group">
+        <div class="form-group" id="cfAmountGroup">
           <label class="form-label">Amount (PKR)</label>
           <input type="number" id="cfAmount" class="form-input mono" placeholder="0.00" min="0.01" step="0.01">
           <span class="form-error" id="errCfAmount"></span>
+        </div>
+        <div class="form-group" id="cfGrossGroup" style="display:none">
+          <label class="form-label">Gross Amount (PKR)</label>
+          <input type="number" id="cfGrossAmount" class="form-input mono" placeholder="0.00" min="0.01" step="0.01" oninput="updateDividendNetPreview()">
+          <span class="form-error" id="errCfGrossAmount"></span>
+        </div>
+        <div class="form-group" id="cfTaxRateGroup" style="display:none">
+          <label class="form-label">Tax Rate (%)</label>
+          <input type="number" id="cfTaxRatePct" class="form-input mono" min="0" max="100" step="0.01" oninput="updateDividendNetPreview()">
+          <span class="form-error" id="errCfTaxRatePct"></span>
+        </div>
+        <div class="form-group full" id="cfNetPreviewGroup" style="display:none">
+          <div style="background:var(--elevated);border:1px solid var(--border);border-radius:var(--r);padding:8px 12px;font-size:12px;color:var(--txt2);display:flex;justify-content:space-between">
+            <span>Tax withheld: <span id="cfTaxPreview" class="mono">—</span></span>
+            <span>Net received: <span id="cfNetPreview" class="mono" style="font-weight:700;color:var(--txt)">—</span></span>
+          </div>
         </div>
         <div class="form-group">
           <label class="form-label">Date</label>
@@ -922,6 +945,19 @@ a{color:var(--accent);text-decoration:none}
     </div>
 
     <div class="settings-section">
+      <div class="settings-label">Dividend Tax</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
+        Default withholding tax rate applied to new dividend entries (PSX default is 15% for
+        filers, 30% for non-filers). Pre-fills the Add Cash Entry form — each dividend keeps
+        the rate that applied to it, so changing this doesn't rewrite past entries.
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="number" id="settingsDivTaxRate" class="form-input mono" style="max-width:100px" min="0" max="100" step="0.01" onchange="setDividendTaxRate(this.value)">
+        <span style="font-size:13px;color:var(--txt2)">%</span>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <div class="settings-label">Manual Price Overrides</div>
       <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">Enter prices manually when live fetch fails</div>
       <div class="manual-price-list" id="manualPriceList"></div>
@@ -1070,7 +1106,8 @@ let state = {
   settings: {
     costMethod: 'weightedAvg',
     includeCommission: true,
-    manualPrices: {}
+    manualPrices: {},
+    dividendTaxRatePct: 15
   },
   prices: {},
   cash: { balance: 0, entries: [] }
@@ -2161,6 +2198,19 @@ function renderTransactionLog() {
 /* ══════════════════════════════════════════════════════
    RENDER — CASH LEDGER
 ══════════════════════════════════════════════════════ */
+function renderTaxReport() {
+  const fromVal = document.getElementById('taxReportFrom')?.value || '';
+  const toVal   = document.getElementById('taxReportTo')?.value || '';
+
+  const totalTax = state.cash.entries
+    .filter(c => c.type === 'dividend' && c.grossAmount != null)
+    .filter(c => (!fromVal || c.date >= fromVal) && (!toVal || c.date <= toVal))
+    .reduce((sum, c) => sum + (c.grossAmount - c.amount), 0);
+
+  const el = document.getElementById('taxReportTotal');
+  if (el) el.textContent = `PKR ${fPKR(totalTax)}`;
+}
+
 function getSymbolDividendTotal(symbol) {
   return state.cash.entries
     .filter(c => c.type === 'dividend' && c.symbol === symbol)
@@ -2177,16 +2227,21 @@ function renderCashLedger() {
   }
 
   const sorted = [...state.cash.entries].sort((a,b) => new Date(b.date) - new Date(a.date));
-  tbody.innerHTML = sorted.map(c => `<tr>
+  tbody.innerHTML = sorted.map(c => {
+    const taxSubtext = (c.type === 'dividend' && c.grossAmount != null)
+      ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Gross ${fPKR(c.grossAmount)} − Tax ${fPKR(c.grossAmount - c.amount)} (${fPct(c.taxRatePct||0)})</span>`
+      : '';
+    return `<tr>
     <td style="text-align:left;font-family:var(--mono)">${c.date}</td>
     <td style="text-align:left"><span class="tx-type ${c.type}">${c.type.toUpperCase()}</span></td>
     <td style="text-align:left"><span class="sym">${c.symbol||'—'}</span></td>
-    <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${fPKR(c.amount)}</td>
+    <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${fPKR(c.amount)}${taxSubtext}</td>
     <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.notes||'—'}</td>
     <td style="text-align:center">
       <button class="btn btn-sm btn-danger" onclick="deleteCashEntry('${c.id}')">✕</button>
     </td>
-  </tr>`).join('');
+  </tr>`;
+  }).join('');
 }
 
 /* ══════════════════════════════════════════════════════
@@ -2201,6 +2256,7 @@ function renderAll() {
   renderAnalystSummary();
   renderTransactionLog();
   renderCashLedger();
+  renderTaxReport();
   renderSettingsUI();
 }
 
@@ -2345,11 +2401,13 @@ async function deleteTransaction(id) {
 async function addCashEntry(data) {
   const payload = {
     type: data.type,
-    amount: parseFloat(data.amount),
+    amount: data.amount != null ? parseFloat(data.amount) : null,
     date: data.date,
     notes: data.notes || '',
     symbol: data.symbol || null,
-    creditToCash: data.creditToCash !== undefined ? data.creditToCash : true
+    creditToCash: data.creditToCash !== undefined ? data.creditToCash : true,
+    grossAmount: data.grossAmount != null ? parseFloat(data.grossAmount) : null,
+    taxRatePct: data.taxRatePct != null ? parseFloat(data.taxRatePct) : null
   };
 
   try {
@@ -2404,9 +2462,13 @@ function openCashModal() {
   document.getElementById('cfType').value = 'deposit';
   document.getElementById('cfSymbol').value = '';
   document.getElementById('cfAmount').value = '';
+  document.getElementById('cfGrossAmount').value = '';
+  document.getElementById('cfTaxRatePct').value = state.settings.dividendTaxRatePct;
   document.getElementById('cfDate').value = new Date().toISOString().split('T')[0];
   document.getElementById('cfNotes').value = '';
   document.getElementById('errCfAmount').textContent = '';
+  document.getElementById('errCfGrossAmount').textContent = '';
+  document.getElementById('errCfTaxRatePct').textContent = '';
   document.getElementById('errCfDate').textContent = '';
   document.getElementById('errCfSymbol').textContent = '';
   setCreditToCash(true);
@@ -2422,6 +2484,20 @@ function updateCashModalMode() {
   const isDividend = document.getElementById('cfType').value === 'dividend';
   document.getElementById('cfSymbolGroup').style.display = isDividend ? '' : 'none';
   document.getElementById('cfCreditGroup').style.display = isDividend ? '' : 'none';
+  document.getElementById('cfAmountGroup').style.display = isDividend ? 'none' : '';
+  document.getElementById('cfGrossGroup').style.display = isDividend ? '' : 'none';
+  document.getElementById('cfTaxRateGroup').style.display = isDividend ? '' : 'none';
+  document.getElementById('cfNetPreviewGroup').style.display = isDividend ? '' : 'none';
+  if (isDividend) updateDividendNetPreview();
+}
+
+function updateDividendNetPreview() {
+  const gross = parseFloat(document.getElementById('cfGrossAmount').value) || 0;
+  const rate  = parseFloat(document.getElementById('cfTaxRatePct').value) || 0;
+  const tax   = gross * rate / 100;
+  const net   = gross - tax;
+  document.getElementById('cfTaxPreview').textContent = `PKR ${fPKR(tax)}`;
+  document.getElementById('cfNetPreview').textContent = `PKR ${fPKR(net)}`;
 }
 
 function setCreditToCash(credit) {
@@ -2432,24 +2508,41 @@ function setCreditToCash(credit) {
 
 async function submitCashEntry() {
   document.getElementById('errCfAmount').textContent = '';
+  document.getElementById('errCfGrossAmount').textContent = '';
+  document.getElementById('errCfTaxRatePct').textContent = '';
   document.getElementById('errCfDate').textContent = '';
   document.getElementById('errCfSymbol').textContent = '';
   let valid = true;
 
   const type         = document.getElementById('cfType').value;
   const symbol       = document.getElementById('cfSymbol').value.trim().toUpperCase();
-  const amount       = parseFloat(document.getElementById('cfAmount').value);
   const date         = document.getElementById('cfDate').value;
   const notes        = document.getElementById('cfNotes').value;
   const creditToCash = document.getElementById('cfCreditToCash').value === 'true';
 
-  if (type === 'dividend' && !symbol) {
-    document.getElementById('errCfSymbol').textContent = 'Script is required for a dividend';
-    valid = false;
-  }
-  if (!amount || amount <= 0) {
-    document.getElementById('errCfAmount').textContent = 'Must be a positive number';
-    valid = false;
+  let amount = null, grossAmount = null, taxRatePct = null;
+
+  if (type === 'dividend') {
+    if (!symbol) {
+      document.getElementById('errCfSymbol').textContent = 'Script is required for a dividend';
+      valid = false;
+    }
+    grossAmount = parseFloat(document.getElementById('cfGrossAmount').value);
+    taxRatePct  = parseFloat(document.getElementById('cfTaxRatePct').value);
+    if (!grossAmount || grossAmount <= 0) {
+      document.getElementById('errCfGrossAmount').textContent = 'Must be a positive number';
+      valid = false;
+    }
+    if (isNaN(taxRatePct) || taxRatePct < 0 || taxRatePct > 100) {
+      document.getElementById('errCfTaxRatePct').textContent = 'Must be 0–100';
+      valid = false;
+    }
+  } else {
+    amount = parseFloat(document.getElementById('cfAmount').value);
+    if (!amount || amount <= 0) {
+      document.getElementById('errCfAmount').textContent = 'Must be a positive number';
+      valid = false;
+    }
   }
   if (!date) {
     document.getElementById('errCfDate').textContent = 'Date required';
@@ -2457,7 +2550,7 @@ async function submitCashEntry() {
   }
   if (!valid) return;
 
-  const ok = await addCashEntry({ type, symbol, amount, date, notes, creditToCash });
+  const ok = await addCashEntry({ type, symbol, amount, date, notes, creditToCash, grossAmount, taxRatePct });
   if (ok) closeCashModal();
 }
 
@@ -2651,6 +2744,19 @@ function toggleSetting(key) {
   renderAll();
 }
 
+function setDividendTaxRate(value) {
+  const rate = parseFloat(value);
+  if (isNaN(rate) || rate < 0 || rate > 100) {
+    toast('Tax rate must be between 0 and 100', 'error');
+    renderSettingsUI();
+    return;
+  }
+  const prev = cloneSettings();
+  state.settings.dividendTaxRatePct = rate;
+  pushSettings(prev);
+  toast(`Default dividend tax rate set to ${rate}%`, 'info');
+}
+
 function renderSettingsUI() {
   const { costMethod, includeCommission } = state.settings;
 
@@ -2665,6 +2771,12 @@ function renderSettingsUI() {
   // Toggles
   const tComm = document.getElementById('toggleCommission');
   if (tComm) tComm.classList.toggle('on', !!includeCommission);
+
+  // Dividend tax rate
+  const taxRateInput = document.getElementById('settingsDivTaxRate');
+  if (taxRateInput && document.activeElement !== taxRateInput) {
+    taxRateInput.value = state.settings.dividendTaxRatePct;
+  }
 
   // Manual prices
   const symbols = [...new Set(state.transactions.map(t => t.symbol))].sort();
