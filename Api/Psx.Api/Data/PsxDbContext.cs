@@ -34,6 +34,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
         {
             b.HasKey(s => s.UserId);
             b.Property(s => s.DividendTaxRatePct).HasColumnType("decimal(5,2)");
+            b.Property(s => s.OwnerName).HasMaxLength(100);
             b.HasOne(s => s.User)
                 .WithOne(u => u.Settings)
                 .HasForeignKey<UserSettings>(s => s.UserId)

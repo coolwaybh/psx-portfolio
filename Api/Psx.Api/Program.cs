@@ -258,6 +258,7 @@ settings.MapPut("/", async (SettingsDto dto, ClaimsPrincipal principal, PsxDbCon
     s.ManualPricesJson = JsonSerializer.Serialize(dto.ManualPrices ?? new Dictionary<string, decimal>());
     if (dto.DividendTaxRatePct >= 0 && dto.DividendTaxRatePct <= 100)
         s.DividendTaxRatePct = dto.DividendTaxRatePct;
+    s.OwnerName = string.IsNullOrWhiteSpace(dto.OwnerName) ? null : dto.OwnerName.Trim()[..Math.Min(dto.OwnerName.Trim().Length, 100)];
     await db.SaveChangesAsync();
     return Results.Ok(SettingsDto.From(s));
 });
@@ -482,13 +483,14 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 record AuthRequest(string? Username, string? Password);
 record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false);
 record ImportRequest(List<LedgerCreateRequest> Transactions);
-record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct)
+record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct, string? OwnerName)
 {
     public static SettingsDto From(UserSettings s) => new(
         s.CostMethod,
         s.IncludeCommission,
         JsonSerializer.Deserialize<Dictionary<string, decimal>>(s.ManualPricesJson) ?? new(),
-        s.DividendTaxRatePct
+        s.DividendTaxRatePct,
+        s.OwnerName
     );
 }
 record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes)

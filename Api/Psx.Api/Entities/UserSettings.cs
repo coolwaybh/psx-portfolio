@@ -13,4 +13,8 @@ public class UserSettings
     // currently 15% for filers). Just a pre-fill default - each CashEntry stores the
     // rate that actually applied to it, so changing this later never rewrites history.
     public decimal DividendTaxRatePct { get; set; } = 15m;
+
+    // Display name shown on the dashboard (e.g. "Sarfraz's Portfolio") - distinct from
+    // Username (the login handle), purely cosmetic.
+    public string? OwnerName { get; set; }
 }

@@ -465,7 +465,7 @@ a{color:var(--accent);text-decoration:none}
   <div class="header-brand">
     <div class="logo-mark">PSX</div>
     <div>
-      <div class="logo-text">Portfolio Dashboard</div>
+      <div class="logo-text" id="logoText">Portfolio Dashboard</div>
       <div class="logo-sub">Pakistan Stock Exchange</div>
     </div>
   </div>
@@ -910,6 +910,12 @@ a{color:var(--accent);text-decoration:none}
     <button class="btn btn-icon btn-sm" onclick="closeSettings()">✕</button>
   </div>
   <div class="settings-body">
+
+    <div class="settings-section">
+      <div class="settings-label">Profile</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">Shown on the dashboard header</div>
+      <input type="text" id="settingsOwnerName" class="form-input" placeholder="e.g. Sarfraz Ahmed" onchange="setOwnerName(this.value)">
+    </div>
 
     <div class="settings-section">
       <div class="settings-label">Cost Method</div>
@@ -3068,6 +3074,7 @@ function renderAll() {
   renderCashLedger();
   renderTaxReport();
   renderSettingsUI();
+  updateHeaderOwnerName();
 }
 
 /* ══════════════════════════════════════════════════════
@@ -3609,8 +3616,27 @@ function setDividendTaxRate(value) {
   toast(`Default dividend tax rate set to ${rate}%`, 'info');
 }
 
+function setOwnerName(value) {
+  const prev = cloneSettings();
+  state.settings.ownerName = value.trim() || null;
+  pushSettings(prev);
+  updateHeaderOwnerName();
+  toast(state.settings.ownerName ? `Portfolio owner set to ${state.settings.ownerName}` : 'Portfolio owner cleared', 'info');
+}
+
+function updateHeaderOwnerName() {
+  const el = document.getElementById('logoText');
+  if (el) el.textContent = state.settings.ownerName ? `${state.settings.ownerName}'s Portfolio` : 'Portfolio Dashboard';
+}
+
 function renderSettingsUI() {
   const { costMethod, includeCommission } = state.settings;
+
+  // Owner name
+  const ownerInput = document.getElementById('settingsOwnerName');
+  if (ownerInput && document.activeElement !== ownerInput) {
+    ownerInput.value = state.settings.ownerName || '';
+  }
 
   // Cost method radios
   const roWA   = document.getElementById('roWA');
@@ -3733,7 +3759,8 @@ function exportCSV() {
       tx.date, tx.type.toUpperCase(), tx.symbol, tx.sector,
       tx.shares, tx.price, tx.commission, (tx.shares * tx.price).toFixed(2), `"${(tx.notes||'').replace(/"/g,'""')}"`
     ]);
-  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+  const ownerLine = state.settings.ownerName ? [[`Portfolio Owner: ${state.settings.ownerName}`], []] : [];
+  const csv = [...ownerLine, headers, ...rows].map(r => r.join(',')).join('\n');
   const blob = new Blob([csv], { type: 'text/csv' });
   const url  = URL.createObjectURL(blob);
   const a    = document.createElement('a');
