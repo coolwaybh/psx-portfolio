@@ -7,10 +7,8 @@ public enum CashType
     Dividend
 }
 
-// Uninvested "free cash" ledger — deposits, withdrawals, dividends. Deliberately NOT
-// linked to LedgerEntry buys/sells (those don't auto-debit/credit cash) — this is a
-// standalone running balance the user maintains themselves, same spirit as the stock
-// ledger but simpler.
+// Uninvested "free cash" ledger — deposits, withdrawals, dividends, and auto-created
+// entries linked to a stock buy/sell (see LedgerEntryId below).
 public class CashEntry
 {
     public int Id { get; set; }
@@ -43,4 +41,14 @@ public class CashEntry
     // first, then fall back to a reverse lookup (any row whose LinkedEntryId == this id).
     public int? LinkedEntryId { get; set; }
     public CashEntry? LinkedEntry { get; set; }
+
+    // Set when this entry was auto-created from a stock buy/sell (Withdrawal for a buy,
+    // Deposit for a sell) - null for manual deposits/withdrawals, dividends, and entries
+    // from an Opening Position or bulk import (those don't touch free cash - they
+    // represent shares the user already held or is backfilling, not a purchase made
+    // through the app right now). Deleting the LedgerEntry deletes this row too, handled
+    // in application code (not a DB cascade - CashEntries already cascades from Users,
+    // and a second cascade path via LedgerEntry would hit SQL Server's multi-path error).
+    public int? LedgerEntryId { get; set; }
+    public LedgerEntry? LedgerEntry { get; set; }
 }

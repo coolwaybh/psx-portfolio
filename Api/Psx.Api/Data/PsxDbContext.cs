@@ -59,6 +59,16 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
                 .WithMany()
                 .HasForeignKey(c => c.LinkedEntryId)
                 .OnDelete(DeleteBehavior.NoAction);
+            // Link to the LedgerEntry that auto-created this entry (buy/sell -> cash).
+            // NoAction, not Cascade, for the same reason as above - CashEntries already
+            // cascades from Users directly, and Users also cascades to LedgerEntries, so
+            // a DB-level cascade here would be a second path to the same table (SQL
+            // Server error 1785). Deletion is handled explicitly in the ledger DELETE
+            // endpoint instead.
+            b.HasOne(c => c.LedgerEntry)
+                .WithMany()
+                .HasForeignKey(c => c.LedgerEntryId)
+                .OnDelete(DeleteBehavior.NoAction);
         });
     }
 }

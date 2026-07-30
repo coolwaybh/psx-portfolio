@@ -126,8 +126,38 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
             return Results.BadRequest(new { error = $"Cannot sell {entry.Shares} shares — only {available} available." });
     }
 
+    await using var tx = await db.Database.BeginTransactionAsync();
     db.LedgerEntries.Add(entry);
     await db.SaveChangesAsync();
+
+    // A regular buy/sell auto-debits/credits free cash. Opening positions and bulk
+    // imports skip this (req.SkipCashEntry) - those represent shares already held or
+    // being backfilled, not a purchase made through the app right now. No check against
+    // available free cash here - a negative balance is allowed, just tracked.
+    if (!req.SkipCashEntry)
+    {
+        var total = entry.Shares * entry.Price;
+        var cashAmount = entry.Type == TxType.Buy ? total + entry.Commission : total - entry.Commission;
+        // Amount must stay positive (CashCalculator assumes magnitude, sign comes from
+        // Type) - skip in the pathological case where a sell's commission alone would
+        // wipe out or exceed the proceeds, rather than fabricate a zero/negative row.
+        if (cashAmount > 0)
+        {
+            var cashEntry = new CashEntry
+            {
+                UserId = userId,
+                Type = entry.Type == TxType.Buy ? CashType.Withdrawal : CashType.Deposit,
+                Amount = cashAmount,
+                EntryDate = entry.TxDate,
+                Notes = $"{entry.Type} {entry.Shares} {entry.Symbol} @ {entry.Price}",
+                LedgerEntryId = entry.Id,
+            };
+            db.CashEntries.Add(cashEntry);
+            await db.SaveChangesAsync();
+        }
+    }
+    await tx.CommitAsync();
+
     return Results.Created($"/api/ledger/{entry.Id}", LedgerDto.From(entry));
 });
 
@@ -145,8 +175,15 @@ ledger.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbCon
             return Results.BadRequest(new { error = "Cannot delete — would cause negative shares on a later sell." });
     }
 
+    await using var tx = await db.Database.BeginTransactionAsync();
+    // Remove the auto-linked cash entry too, if this transaction created one - not
+    // re-validated against the cash balance (same "allow negative" tradeoff as adding).
+    var linkedCash = await db.CashEntries.FirstOrDefaultAsync(c => c.LedgerEntryId == id && c.UserId == userId);
+    if (linkedCash is not null) db.CashEntries.Remove(linkedCash);
+
     db.LedgerEntries.Remove(entry);
     await db.SaveChangesAsync();
+    await tx.CommitAsync();
     return Results.Ok();
 });
 
@@ -442,7 +479,7 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 }
 
 record AuthRequest(string? Username, string? Password);
-record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes);
+record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false);
 record ImportRequest(List<LedgerCreateRequest> Transactions);
 record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct)
 {
@@ -461,11 +498,11 @@ record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shar
     );
 }
 record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null);
-record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct)
+record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId)
 {
     public static CashDto From(CashEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes,
-        e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct
+        e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct, e.LedgerEntryId
     );
 }
 

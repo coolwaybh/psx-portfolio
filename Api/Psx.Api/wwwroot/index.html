@@ -3129,7 +3129,8 @@ async function addTransaction(data) {
     price:  parseFloat(data.price),
     commission: parseFloat(data.commission) || 0,
     date: data.date,
-    notes: data.notes || ''
+    notes: data.notes || '',
+    skipCashEntry: !!data.skipCashEntry
   };
 
   // Client-side pre-check for instant feedback — the server re-validates this
@@ -3159,8 +3160,22 @@ async function addTransaction(data) {
     tx.price = parseFloat(tx.price);
     tx.commission = parseFloat(tx.commission);
     state.transactions.push(tx);
+
+    // A regular buy/sell auto-debits/credits free cash server-side - refresh our copy
+    // so the Free Cash KPI and Cash Ledger reflect it immediately (opening positions skip
+    // this since they never touched cash to begin with).
+    if (!payload.skipCashEntry) {
+      await reloadCash();
+      const total = tx.shares * tx.price;
+      const cashAmount = tx.type === 'buy' ? total + tx.commission : total - tx.commission;
+      const cashNote = cashAmount > 0
+        ? (tx.type === 'buy' ? ` — PKR ${fPKR(cashAmount)} deducted from free cash` : ` — PKR ${fPKR(cashAmount)} credited to free cash`)
+        : '';
+      toast(`${tx.type.toUpperCase()} ${fNum(tx.shares)} × ${tx.symbol} added${cashNote}`, 'success');
+    } else {
+      toast(`${tx.type.toUpperCase()} ${fNum(tx.shares)} × ${tx.symbol} added`, 'success');
+    }
     renderAll();
-    toast(`${tx.type.toUpperCase()} ${fNum(tx.shares)} × ${tx.symbol} added`, 'success');
     return true;
   } catch(e) {
     toast('Network error — could not add transaction', 'error');
@@ -3181,6 +3196,8 @@ async function deleteTransaction(id) {
       return;
     }
     state.transactions = state.transactions.filter(t => t.id !== id);
+    // Reverses any auto-linked cash entry too (handled server-side) - refresh to match.
+    await reloadCash();
     renderAll();
     toast('Transaction removed', 'info');
   } catch(e) {
@@ -3481,14 +3498,19 @@ async function submitTransaction() {
   }
   if (!valid) return;
 
-  const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, date, notes });
+  const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, date, notes, skipCashEntry: openingMode });
   if (ok) closeModal();
 }
 
-// Allow live sell validation on symbol input
+// Allow live sell validation + sector auto-fill on symbol input. Listens to both
+// 'input' and 'change' - some browsers (notably Safari) don't reliably fire 'input'
+// when a value is chosen by clicking a <datalist> suggestion rather than typed.
 document.addEventListener('DOMContentLoaded', () => {
   const fSym = document.getElementById('fSymbol');
-  if (fSym) fSym.addEventListener('input', handleSymbolInput);
+  if (fSym) {
+    fSym.addEventListener('input', handleSymbolInput);
+    fSym.addEventListener('change', handleSymbolInput);
+  }
 });
 
 /* ══════════════════════════════════════════════════════
