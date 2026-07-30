@@ -1,0 +1,2627 @@
+<!--
+  ================================================================
+  PSX PORTFOLIO DASHBOARD — Single-File SPA
+  ================================================================
+  ARCHITECTURE:
+    No build step. No backend. Runs entirely in the browser.
+    All data persisted in localStorage under key 'psxPortfolio_v2'.
+    Chart.js 4.x loaded from CDN for all visualizations.
+
+  DATA MODEL:
+    state.transactions  → Array<Transaction>
+      Transaction: { id, type('buy'|'sell'), symbol, sector,
+                     shares, price, commission, date, notes }
+    state.settings      → { costMethod, includeCommission, manualPrices }
+    state.prices        → { [symbol]: { price, change, changePct,
+                                        status, updatedAt } }
+
+  COST METHODS:
+    Weighted Average — running avg cost recalculated on each buy;
+      sells reduce total cost proportionally.
+    FIFO — each buy is a lot; sells consume oldest lots first;
+      remaining lots determine cost basis.
+
+  PRICE FETCHING:
+    dps.psx.com.pk/market-watch (PSX official) returns a full live
+    market-watch HTML table (no public JSON API exists), fetched
+    through a CORS proxy (proxy.cors.sh, then allorigins.win) and
+    parsed client-side with DOMParser. One request covers every
+    symbol. Falls back to settings.manualPrices per-symbol on miss.
+
+  RENDERING:
+    All charts are destroyed then recreated on every renderAll() call.
+    Holdings are computed fresh from the transaction log each time.
+    DOM is imperatively updated — no virtual DOM / framework.
+
+  EXTENDING:
+    • New cost method  → implement in computeHoldings(), add to settings UI
+    • New chart        → add <canvas> to HTML, instantiate in renderCharts()
+    • New data source  → add provider in refreshPrices()
+    • New KPI card     → add element in HTML, update in renderKPIs()
+  ================================================================
+-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PSX Portfolio Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+/* ── CSS VARIABLES ─────────────────────────────────────────── */
+:root {
+  --bg:        #eef1f6;
+  --bg2:       #e5eaf3;
+  --card:      #ffffff;
+  --elevated:  #f5f7fb;
+  --border:    #cdd5e0;
+  --border2:   #e2e8f2;
+  --txt:       #0d1829;
+  --txt2:      #465873;
+  --txt3:      #8898b0;
+  --accent:    #1a56db;
+  --accent-bg: rgba(26,86,219,.07);
+  --green:     #0a6e42;
+  --green-bg:  rgba(10,110,66,.07);
+  --red:       #b91c1c;
+  --red-bg:    rgba(185,28,28,.07);
+  --amber:     #92400e;
+  --amber-bg:  rgba(146,64,14,.08);
+  --cyan:      #0369a1;
+  --purple:    #6d28d9;
+  --ui:        'Space Grotesk', sans-serif;
+  --mono:      'JetBrains Mono', monospace;
+  --r:         6px;
+  --r2:        10px;
+  --shadow:    0 2px 16px rgba(13,24,41,.10), 0 1px 4px rgba(13,24,41,.06);
+}
+
+/* ── RESET ──────────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{font-family:var(--ui);background:var(--bg);color:var(--txt);font-size:14px;min-height:100vh;overflow-x:hidden}
+button,input,select,textarea{font-family:inherit}
+table{border-collapse:collapse;width:100%}
+a{color:var(--accent);text-decoration:none}
+
+/* ── SCROLLBAR ───────────────────────────────────────────────── */
+::-webkit-scrollbar{width:6px;height:6px}
+::-webkit-scrollbar-track{background:var(--bg)}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}
+::-webkit-scrollbar-thumb:hover{background:var(--txt3)}
+
+/* ── LAYOUT ──────────────────────────────────────────────────── */
+.wrap{max-width:1600px;margin:0 auto;padding:0 20px}
+
+/* ── HEADER ──────────────────────────────────────────────────── */
+.header{
+  position:sticky;top:0;z-index:200;
+  background:rgba(255,255,255,.92);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border2);
+  box-shadow:0 1px 6px rgba(13,24,41,.07);
+  padding:0 20px;height:56px;
+  display:flex;align-items:center;justify-content:space-between;gap:16px;
+}
+.header-brand{display:flex;align-items:center;gap:12px;flex-shrink:0}
+.logo-mark{
+  width:32px;height:32px;border-radius:8px;
+  background:linear-gradient(135deg,#1a3a6b,#0a6ebd);
+  display:flex;align-items:center;justify-content:center;
+  font-weight:700;font-size:13px;color:#fff;letter-spacing:-.5px;
+}
+.logo-text{font-weight:700;font-size:16px;letter-spacing:-.3px}
+.logo-sub{font-size:11px;color:var(--txt2);font-family:var(--mono)}
+.header-meta{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--txt2);font-family:var(--mono)}
+.status-dot{width:6px;height:6px;border-radius:50%;background:var(--txt3);display:inline-block}
+.status-dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.fetching{background:var(--amber);animation:pulse 1s infinite}
+.header-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+
+/* ── BUTTONS ─────────────────────────────────────────────────── */
+.btn{
+  display:inline-flex;align-items:center;gap:6px;
+  padding:7px 14px;border-radius:var(--r);border:1px solid var(--border);
+  background:var(--elevated);color:var(--txt);font-size:13px;font-weight:500;
+  cursor:pointer;transition:all .15s;white-space:nowrap;
+}
+.btn:hover{border-color:var(--txt2);background:var(--card)}
+.btn-primary{background:var(--accent);border-color:var(--accent);color:#fff}
+.btn-primary:hover{background:#1744be;border-color:#1744be}
+.btn-danger{color:var(--red);border-color:var(--red-bg)}
+.btn-danger:hover{background:var(--red-bg);border-color:var(--red)}
+.btn-sm{padding:4px 10px;font-size:12px}
+.btn-icon{padding:6px;aspect-ratio:1}
+.spin{animation:rotate .8s linear infinite;display:inline-block}
+@keyframes rotate{to{transform:rotate(360deg)}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+
+/* ── KPI GRID ────────────────────────────────────────────────── */
+.kpi-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(200px,1fr));
+  gap:12px;padding:20px 20px 0;
+}
+.kpi-card{
+  background:var(--card);border:1px solid var(--border2);border-radius:var(--r2);
+  padding:16px;position:relative;overflow:hidden;
+  box-shadow:0 1px 5px rgba(13,24,41,.07);
+}
+.kpi-card::before{
+  content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:var(--accent);opacity:.7;
+}
+.kpi-card.green::before{background:var(--green)}
+.kpi-card.red::before{background:var(--red)}
+.kpi-card.amber::before{background:var(--amber)}
+.kpi-label{font-size:11px;color:var(--txt2);font-weight:500;text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
+.kpi-val{font-family:var(--mono);font-size:20px;font-weight:700;line-height:1.1;margin-bottom:4px}
+.kpi-sub{font-family:var(--mono);font-size:11px;color:var(--txt2)}
+.kpi-badge{
+  font-family:var(--mono);font-size:11px;font-weight:600;
+  padding:2px 7px;border-radius:20px;display:inline-flex;align-items:center;gap:3px;
+}
+.kpi-badge.pos{background:var(--green-bg);color:var(--green)}
+.kpi-badge.neg{background:var(--red-bg);color:var(--red)}
+.kpi-badge.neu{background:var(--elevated);color:var(--txt2)}
+
+/* ── SECTION ─────────────────────────────────────────────────── */
+.section{padding:20px 20px 0}
+.section-hd{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:14px;gap:12px;
+}
+.section-title{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.section-title .badge{
+  font-size:11px;font-family:var(--mono);padding:2px 8px;
+  background:var(--elevated);border:1px solid var(--border);border-radius:20px;color:var(--txt2);
+}
+.pill{
+  font-size:11px;font-family:var(--mono);padding:2px 8px;
+  background:var(--accent-bg);color:var(--accent);border-radius:20px;
+  border:1px solid rgba(26,86,219,.2);
+}
+
+/* ── TABLE ───────────────────────────────────────────────────── */
+.tbl-wrap{overflow-x:auto;border-radius:var(--r2);border:1px solid var(--border2);box-shadow:0 1px 4px rgba(13,24,41,.06)}
+.tbl{font-size:13px}
+.tbl thead tr{background:#f0f4fa;border-bottom:2px solid var(--border)}
+.tbl thead th{
+  padding:10px 12px;text-align:right;font-weight:600;font-size:11px;
+  color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;
+  white-space:nowrap;cursor:pointer;user-select:none;transition:color .15s;
+}
+.tbl thead th:first-child,.tbl thead th:nth-child(2){text-align:left}
+.tbl thead th:hover{color:var(--txt)}
+.tbl thead th .sort-icon{margin-left:4px;opacity:.4;font-size:10px}
+.tbl thead th.sorted .sort-icon{opacity:1;color:var(--accent)}
+.tbl tbody tr{border-bottom:1px solid var(--border2);transition:background .1s}
+.tbl tbody tr:last-child{border-bottom:none}
+.tbl tbody tr:hover{background:var(--elevated)}
+.tbl tbody tr.row-green{background:rgba(10,110,66,.04)}
+.tbl tbody tr.row-red{background:rgba(185,28,28,.04)}
+.tbl td{padding:10px 12px;font-family:var(--mono);font-size:12px;text-align:right;vertical-align:middle}
+.tbl td:first-child,.tbl td:nth-child(2){text-align:left;font-family:var(--ui)}
+.tbl .sym{font-weight:700;font-size:13px;color:var(--txt)}
+.tbl .sector-tag{
+  font-size:10px;padding:2px 7px;border-radius:20px;
+  background:var(--elevated);border:1px solid var(--border);color:var(--txt2);
+  white-space:nowrap;
+}
+.val-pos{color:var(--green)}
+.val-neg{color:var(--red)}
+.val-neu{color:var(--txt2)}
+.no-data{text-align:center;padding:40px;color:var(--txt3);font-size:13px}
+
+/* ── MINI PROGRESS BAR ───────────────────────────────────────── */
+.mini-bar-wrap{display:flex;align-items:center;gap:6px;justify-content:flex-end}
+.mini-bar{height:3px;border-radius:2px;min-width:30px;max-width:80px;background:var(--border2);overflow:hidden;flex-shrink:0}
+.mini-bar-fill{height:100%;border-radius:2px;transition:width .3s}
+
+/* ── CHARTS ──────────────────────────────────────────────────── */
+.charts-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(420px,1fr));
+  gap:16px;
+}
+.chart-card{
+  background:var(--card);border:1px solid var(--border2);border-radius:var(--r2);
+  padding:16px;box-shadow:0 1px 5px rgba(13,24,41,.07);
+}
+.chart-title{font-size:12px;font-weight:600;color:var(--txt2);text-transform:uppercase;letter-spacing:.5px;margin-bottom:12px}
+.chart-body{position:relative;height:240px}
+
+/* ── BOTTOM GRID ─────────────────────────────────────────────── */
+.bottom-grid{
+  display:grid;grid-template-columns:1fr 1fr 1fr;gap:16px;
+  padding:20px 20px 0;
+}
+@media(max-width:1200px){.bottom-grid{grid-template-columns:1fr 1fr}}
+@media(max-width:900px){.bottom-grid{grid-template-columns:1fr}}
+
+/* ── MOVERS ──────────────────────────────────────────────────── */
+.movers-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.mover-group{background:var(--elevated);border-radius:var(--r);padding:12px}
+.mover-group-title{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;margin-bottom:10px}
+.mover-group-title.g{color:var(--green)}
+.mover-group-title.r{color:var(--red)}
+.mover-row{display:flex;align-items:center;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border2)}
+.mover-row:last-child{border-bottom:none}
+.mover-sym{font-weight:700;font-size:13px}
+.mover-vals{text-align:right;font-family:var(--mono);font-size:11px}
+
+/* ── REALIZED P&L TABLE ──────────────────────────────────────── */
+.rpnl-summary{
+  display:flex;gap:16px;margin-bottom:14px;padding:12px;
+  background:var(--elevated);border-radius:var(--r);
+}
+.rpnl-item{flex:1;text-align:center}
+.rpnl-lbl{font-size:11px;color:var(--txt2);margin-bottom:4px;text-transform:uppercase;letter-spacing:.4px}
+.rpnl-val{font-family:var(--mono);font-weight:700;font-size:16px}
+
+/* ── TRANSACTION LOG ─────────────────────────────────────────── */
+.txlog-filters{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:12px}
+.txlog-filters select,.txlog-filters input{
+  background:var(--elevated);border:1px solid var(--border);color:var(--txt);
+  padding:6px 10px;border-radius:var(--r);font-size:13px;
+}
+.tx-type{
+  font-size:10px;font-weight:700;padding:2px 7px;border-radius:3px;letter-spacing:.5px;
+}
+.tx-type.buy{background:rgba(10,110,66,.10);color:var(--green)}
+.tx-type.sell{background:rgba(185,28,28,.10);color:var(--red)}
+
+/* ── MODAL ───────────────────────────────────────────────────── */
+.modal-backdrop{
+  position:fixed;inset:0;background:rgba(13,24,41,.45);z-index:500;
+  display:flex;align-items:center;justify-content:center;padding:20px;
+  opacity:0;pointer-events:none;transition:opacity .2s;
+}
+.modal-backdrop.open{opacity:1;pointer-events:all}
+.modal{
+  background:var(--card);border:1px solid var(--border);border-radius:var(--r2);
+  width:100%;max-width:520px;box-shadow:var(--shadow);
+  transform:translateY(-20px);transition:transform .2s;
+}
+.modal-backdrop.open .modal{transform:none}
+.modal-hd{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 20px;border-bottom:1px solid var(--border2);
+}
+.modal-title{font-size:16px;font-weight:600}
+.modal-body{padding:20px}
+.modal-ft{
+  padding:16px 20px;border-top:1px solid var(--border2);
+  display:flex;justify-content:flex-end;gap:8px;
+}
+
+/* ── FORM ────────────────────────────────────────────────────── */
+.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.form-group{display:flex;flex-direction:column;gap:5px}
+.form-group.full{grid-column:1/-1}
+.form-label{font-size:12px;font-weight:500;color:var(--txt2)}
+.form-input{
+  background:var(--elevated);border:1px solid var(--border);color:var(--txt);
+  padding:9px 12px;border-radius:var(--r);font-size:13px;font-family:var(--ui);
+  transition:border-color .15s;
+}
+.form-input:focus{outline:none;border-color:var(--accent)}
+.form-input.mono{font-family:var(--mono)}
+.form-error{font-size:11px;color:var(--red);margin-top:2px}
+.type-toggle{display:flex;gap:6px}
+.type-btn{
+  flex:1;padding:9px;border:1px solid var(--border);border-radius:var(--r);
+  background:var(--elevated);color:var(--txt2);cursor:pointer;font-size:13px;
+  font-weight:500;text-align:center;transition:all .15s;
+}
+.type-btn.active-buy{background:var(--green-bg);border-color:var(--green);color:var(--green)}
+.type-btn.active-sell{background:var(--red-bg);border-color:var(--red);color:var(--red)}
+
+/* ── SETTINGS PANEL ──────────────────────────────────────────── */
+.settings-panel{
+  position:fixed;top:0;right:0;bottom:0;width:360px;z-index:400;
+  background:var(--card);border-left:1px solid var(--border);
+  transform:translateX(100%);transition:transform .25s;
+  overflow-y:auto;display:flex;flex-direction:column;
+}
+.settings-panel.open{transform:none}
+.settings-hd{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:16px 20px;border-bottom:1px solid var(--border2);position:sticky;top:0;
+  background:var(--card);
+}
+.settings-body{padding:20px;display:flex;flex-direction:column;gap:20px;flex:1}
+.settings-section{}
+.settings-label{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.6px;color:var(--txt2);margin-bottom:10px}
+.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border2)}
+.toggle-row:last-child{border-bottom:none}
+.toggle-name{font-size:13px}
+.toggle-desc{font-size:11px;color:var(--txt3);margin-top:2px}
+.toggle-switch{
+  width:40px;height:22px;border-radius:11px;background:var(--border);
+  position:relative;cursor:pointer;transition:background .2s;flex-shrink:0;
+}
+.toggle-switch.on{background:var(--accent)}
+.toggle-switch::after{
+  content:'';position:absolute;top:3px;left:3px;
+  width:16px;height:16px;border-radius:50%;background:#fff;
+  transition:transform .2s;
+}
+.toggle-switch.on::after{transform:translateX(18px)}
+.radio-group{display:flex;flex-direction:column;gap:6px}
+.radio-opt{
+  display:flex;align-items:center;gap:10px;padding:10px 12px;
+  border-radius:var(--r);border:1px solid var(--border);cursor:pointer;
+  transition:all .15s;
+}
+.radio-opt:hover{border-color:var(--txt2)}
+.radio-opt.active{border-color:var(--accent);background:var(--accent-bg)}
+.radio-dot{
+  width:16px;height:16px;border-radius:50%;border:2px solid var(--txt3);
+  flex-shrink:0;transition:all .15s;
+}
+.radio-opt.active .radio-dot{border-color:var(--accent);background:var(--accent)}
+.radio-name{font-size:13px;font-weight:500}
+.radio-desc{font-size:11px;color:var(--txt3)}
+.manual-price-list{display:flex;flex-direction:column;gap:8px;max-height:200px;overflow-y:auto}
+.manual-price-row{display:flex;align-items:center;gap:8px}
+.manual-price-sym{font-weight:700;font-size:13px;width:60px;flex-shrink:0}
+.manual-price-row input{flex:1}
+
+/* ── TOAST ───────────────────────────────────────────────────── */
+.toast-wrap{position:fixed;bottom:24px;right:24px;z-index:9999;display:flex;flex-direction:column;gap:8px;pointer-events:none}
+.toast{
+  background:var(--elevated);border:1px solid var(--border);
+  border-radius:var(--r);padding:12px 16px;font-size:13px;min-width:240px;max-width:360px;
+  pointer-events:all;box-shadow:var(--shadow);
+  animation:slideIn .2s ease;display:flex;align-items:center;gap:10px;
+}
+.toast.success{border-left:3px solid var(--green)}
+.toast.error{border-left:3px solid var(--red)}
+.toast.info{border-left:3px solid var(--accent)}
+.toast.warning{border-left:3px solid var(--amber)}
+.toast-icon{font-size:16px;flex-shrink:0}
+.toast-msg{flex:1;line-height:1.4}
+@keyframes slideIn{from{opacity:0;transform:translateX(20px)}to{opacity:1;transform:none}}
+@keyframes slideOut{to{opacity:0;transform:translateX(20px)}}
+
+/* ── PRICE STATUS ────────────────────────────────────────────── */
+.price-status{font-size:9px;font-weight:600;letter-spacing:.4px;padding:1px 5px;border-radius:3px;text-transform:uppercase;vertical-align:middle;margin-left:4px}
+.price-status.live{background:var(--green-bg);color:var(--green)}
+.price-status.stale{background:var(--amber-bg);color:var(--amber)}
+.price-status.manual{background:var(--elevated);color:var(--txt3);border:1px solid var(--border)}
+.price-status.none{background:var(--elevated);color:var(--txt3);border:1px solid var(--border)}
+
+/* ── DIVIDER ─────────────────────────────────────────────────── */
+.divider{height:1px;background:var(--border2);margin:0 20px}
+
+/* ── RESPONSIVE ──────────────────────────────────────────────── */
+@media(max-width:768px){
+  .charts-grid{grid-template-columns:1fr}
+  .form-grid{grid-template-columns:1fr}
+  .header-meta{display:none}
+  .kpi-grid{grid-template-columns:repeat(2,1fr)}
+  .settings-panel{width:100%}
+  .movers-grid{grid-template-columns:1fr}
+}
+@media(max-width:480px){
+  .kpi-grid{grid-template-columns:1fr}
+  .wrap,.section,.kpi-grid,.bottom-grid{padding-left:12px;padding-right:12px}
+  .header{padding:0 12px}
+}
+
+/* ── MISC ────────────────────────────────────────────────────── */
+.pb-4{padding-bottom:4px}
+.mt-8{margin-top:8px}
+.empty-state{
+  text-align:center;padding:60px 20px;color:var(--txt3);
+  border:1px dashed var(--border);border-radius:var(--r2);
+}
+.empty-state .es-icon{font-size:36px;margin-bottom:12px}
+.empty-state p{font-size:14px;margin-bottom:16px}
+.method-pill{
+  font-size:10px;font-family:var(--mono);padding:2px 7px;
+  background:var(--elevated);border:1px solid var(--border);border-radius:20px;color:var(--txt2);
+}
+
+/* ── ANALYST SIGNAL ──────────────────────────────────────────── */
+.signal{
+  display:inline-flex;flex-direction:column;align-items:center;gap:2px;
+  cursor:help;
+}
+.signal-badge{
+  display:inline-flex;align-items:center;gap:4px;
+  padding:3px 9px;border-radius:4px;
+  font-size:11px;font-weight:700;letter-spacing:.6px;white-space:nowrap;
+}
+.signal-badge.buy {background:rgba(10,110,66,.10);color:var(--green);border:1px solid rgba(10,110,66,.25)}
+.signal-badge.hold{background:rgba(146,64,14,.08);color:var(--amber);border:1px solid rgba(146,64,14,.22)}
+.signal-badge.sell{background:rgba(185,28,28,.09);color:var(--red);  border:1px solid rgba(185,28,28,.22)}
+.signal-conf{display:flex;gap:2px;justify-content:center}
+.signal-conf span{width:6px;height:6px;border-radius:50%}
+.signal-conf.high  .dot1,.signal-conf.high  .dot2,.signal-conf.high  .dot3{background:currentColor}
+.signal-conf.medium .dot1,.signal-conf.medium .dot2{background:currentColor}
+.signal-conf.medium .dot3{background:var(--border)}
+.signal-conf.low   .dot1{background:currentColor}
+.signal-conf.low   .dot2,.signal-conf.low .dot3{background:var(--border)}
+
+/* ── DISCLAIMER BANNER ───────────────────────────────────────── */
+.disclaimer{
+  margin:12px 20px 0;padding:8px 14px;
+  background:rgba(146,64,14,.05);border:1px solid rgba(146,64,14,.18);
+  border-radius:var(--r);font-size:11px;color:var(--txt2);
+  display:flex;align-items:center;gap:8px;
+}
+.disclaimer strong{color:var(--amber)}
+</style>
+</head>
+<body>
+
+<!-- ── HEADER ─────────────────────────────────────────────────── -->
+<header class="header">
+  <div class="header-brand">
+    <div class="logo-mark">PSX</div>
+    <div>
+      <div class="logo-text">Portfolio Dashboard</div>
+      <div class="logo-sub">Pakistan Stock Exchange</div>
+    </div>
+  </div>
+  <div class="header-meta">
+    <span class="status-dot" id="statusDot"></span>
+    <span id="lastUpdated">Not fetched</span>
+    <span style="color:var(--border)">|</span>
+    <span id="methodLabel" class="method-pill">WA Cost</span>
+  </div>
+  <div class="header-actions">
+    <button class="btn btn-sm" id="btnRefresh" onclick="refreshPrices()">
+      <span id="refreshIcon">↻</span> Refresh Prices
+    </button>
+    <button class="btn btn-sm btn-primary" onclick="openModal()">
+      + Add Transaction
+    </button>
+    <button class="btn btn-sm btn-icon" onclick="openSettings()" title="Settings">⚙</button>
+    <span id="currentUsername" class="method-pill" style="margin-left:4px"></span>
+    <button class="btn btn-sm" onclick="logout()" title="Log out">Logout</button>
+  </div>
+</header>
+
+<!-- ── IMPORT LOCAL DATA BANNER ───────────────────────────────── -->
+<div id="importLocalBanner" style="display:none;margin:0 0 16px;padding:12px 16px;background:var(--elevated);border:1px solid var(--border);border-radius:var(--r2);align-items:center;justify-content:space-between;gap:12px">
+  <div style="font-size:13px;color:var(--txt2)">
+    Found portfolio data saved locally in this browser from before accounts existed. Import it into your account?
+  </div>
+  <button class="btn btn-sm btn-primary" onclick="importLocalData()" style="flex-shrink:0">Import Local Data</button>
+</div>
+
+<!-- ── KPI CARDS ──────────────────────────────────────────────── -->
+<div class="kpi-grid" id="kpiGrid">
+  <div class="kpi-card" id="kpiPortValue">
+    <div class="kpi-label">Portfolio Value</div>
+    <div class="kpi-val" id="kv-total">—</div>
+    <div class="kpi-sub">PKR</div>
+  </div>
+  <div class="kpi-card" id="kpiCost">
+    <div class="kpi-label">Total Invested</div>
+    <div class="kpi-val" id="kv-cost">—</div>
+    <div class="kpi-sub">PKR</div>
+  </div>
+  <div class="kpi-card" id="kpiUnrealized">
+    <div class="kpi-label">Unrealized P&amp;L</div>
+    <div class="kpi-val" id="kv-upnl">—</div>
+    <div class="kpi-sub" id="kv-upnl-pct">—</div>
+  </div>
+  <div class="kpi-card" id="kpiDayChg">
+    <div class="kpi-label">Today's Change</div>
+    <div class="kpi-val" id="kv-day">—</div>
+    <div class="kpi-sub" id="kv-day-pct">—</div>
+  </div>
+  <div class="kpi-card" id="kpiPositions">
+    <div class="kpi-label">Active Positions</div>
+    <div class="kpi-val" id="kv-pos">—</div>
+    <div class="kpi-sub">Holdings</div>
+  </div>
+  <div class="kpi-card green" id="kpiBest">
+    <div class="kpi-label">Best Performer</div>
+    <div class="kpi-val" id="kv-best-sym">—</div>
+    <div class="kpi-sub" id="kv-best-pct">—</div>
+  </div>
+  <div class="kpi-card red" id="kpiWorst">
+    <div class="kpi-label">Worst Performer</div>
+    <div class="kpi-val" id="kv-worst-sym">—</div>
+    <div class="kpi-sub" id="kv-worst-pct">—</div>
+  </div>
+</div>
+
+<!-- ── ANALYST DISCLAIMER ─────────────────────────────────────── -->
+<div class="disclaimer">
+  <strong>⚠ Analyst View</strong>
+  The Buy / Hold / Sell signals below reflect fundamental, technical, and sector-level analysis based on historical PSX data and macroeconomic context.
+  They are <strong>not financial advice</strong>. Always conduct your own due diligence before trading.
+</div>
+
+<!-- ── HOLDINGS TABLE ─────────────────────────────────────────── -->
+<section class="section" style="padding-top:20px">
+  <div class="section-hd">
+    <div class="section-title">
+      Holdings <span class="badge" id="holdingsCount">0</span>
+    </div>
+    <div style="display:flex;gap:8px">
+      <select id="holdingSort" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderHoldingsTable()">
+        <option value="symbol">Sort: Symbol</option>
+        <option value="value-desc">Sort: Value ↓</option>
+        <option value="pnl-desc">Sort: P&amp;L ↓</option>
+        <option value="pct-desc">Sort: Return % ↓</option>
+        <option value="weight-desc">Sort: Weight ↓</option>
+        <option value="signal">Sort: Signal (Buy first)</option>
+      </select>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Sector</th>
+          <th>Shares</th>
+          <th>Avg Cost</th>
+          <th>Mkt Price</th>
+          <th>Day Chg</th>
+          <th>Cost Basis</th>
+          <th>Mkt Value</th>
+          <th>Unrealized P&amp;L</th>
+          <th>Return %</th>
+          <th>Weight %</th>
+          <th>Analyst Signal</th>
+          <th>Actions</th>
+        </tr>
+      </thead>
+      <tbody id="holdingsTbody"></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── CHARTS ─────────────────────────────────────────────────── -->
+<section class="section" style="padding-top:20px">
+  <div class="section-hd">
+    <div class="section-title">Analytics</div>
+  </div>
+  <div class="charts-grid">
+    <div class="chart-card">
+      <div class="chart-title">Unrealized P&amp;L by Stock</div>
+      <div class="chart-body"><canvas id="plChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Portfolio Allocation</div>
+      <div class="chart-body"><canvas id="allocChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Cost Basis vs Market Value</div>
+      <div class="chart-body"><canvas id="costMktChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Sector Allocation</div>
+      <div class="chart-body"><canvas id="sectorChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Cumulative P&amp;L Over Time</div>
+      <div class="chart-body"><canvas id="cumulChart"></canvas></div>
+    </div>
+    <div class="chart-card">
+      <div class="chart-title">Return % vs Portfolio Weight (Bubble)</div>
+      <div class="chart-body"><canvas id="bubbleChart"></canvas></div>
+    </div>
+  </div>
+</section>
+
+<!-- ── BOTTOM GRID ────────────────────────────────────────────── -->
+<div class="bottom-grid">
+  <!-- Top Movers -->
+  <section>
+    <div class="section-hd" style="margin-bottom:12px">
+      <div class="section-title">Top Movers</div>
+    </div>
+    <div class="movers-grid" id="moversGrid">
+      <div class="mover-group">
+        <div class="mover-group-title g">▲ Top Gainers</div>
+        <div id="gainersBody"></div>
+      </div>
+      <div class="mover-group">
+        <div class="mover-group-title r">▼ Top Losers</div>
+        <div id="losersBody"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Realized P&L -->
+  <section>
+    <div class="section-hd" style="margin-bottom:12px">
+      <div class="section-title">Realized P&amp;L</div>
+    </div>
+    <div id="realizedSection"></div>
+  </section>
+
+  <!-- Analyst Summary -->
+  <section>
+    <div class="section-hd" style="margin-bottom:12px">
+      <div class="section-title">Analyst Summary</div>
+    </div>
+    <div id="analystSummary"></div>
+  </section>
+</div>
+
+<!-- ── TRANSACTION LOG ────────────────────────────────────────── -->
+<section class="section" style="padding-top:20px;padding-bottom:40px">
+  <div class="section-hd">
+    <div class="section-title">
+      Transaction History <span class="badge" id="txCount">0</span>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="exportCSV()">⬇ Export CSV</button>
+    </div>
+  </div>
+  <div class="txlog-filters">
+    <select id="txFilterSym" class="form-input" onchange="renderTransactionLog()" style="font-size:12px;padding:4px 8px">
+      <option value="">All Symbols</option>
+    </select>
+    <select id="txFilterType" class="form-input" onchange="renderTransactionLog()" style="font-size:12px;padding:4px 8px">
+      <option value="">All Types</option>
+      <option value="buy">Buy</option>
+      <option value="sell">Sell</option>
+    </select>
+    <input type="text" id="txSearch" class="form-input" placeholder="Search notes..." onkeyup="renderTransactionLog()" style="font-size:12px;padding:4px 8px;width:180px">
+  </div>
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th style="text-align:left">Date</th>
+          <th style="text-align:left">Type</th>
+          <th style="text-align:left">Symbol</th>
+          <th style="text-align:left">Sector</th>
+          <th>Shares</th>
+          <th>Price</th>
+          <th>Commission</th>
+          <th>Total Value</th>
+          <th>Notes</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="txTbody"></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── ADD TRANSACTION MODAL ──────────────────────────────────── -->
+<div class="modal-backdrop" id="modalBackdrop" onclick="handleBackdropClick(event)">
+  <div class="modal">
+    <div class="modal-hd">
+      <div class="modal-title" id="modalTitle">Add Transaction</div>
+      <button class="btn btn-icon btn-sm" onclick="closeModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-group full" id="txTypeGroup">
+          <div class="type-toggle">
+            <div class="type-btn active-buy" id="typeBuyBtn" onclick="setTxType('buy')">▲ BUY</div>
+            <div class="type-btn" id="typeSellBtn" onclick="setTxType('sell')">▼ SELL</div>
+          </div>
+          <input type="hidden" id="fTxType" value="buy">
+        </div>
+        <div class="form-group full" id="openingHint" style="display:none">
+          <div style="background:var(--elevated);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--txt2)">
+            Record the position you already hold as of today — quantity and your blended average cost per share. This is saved as a buy so it flows into your cost basis and P&amp;L like any other transaction.
+          </div>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Symbol (PSX Ticker)</label>
+          <input type="text" id="fSymbol" class="form-input mono" list="symbolList" placeholder="e.g. ENGRO" oninput="this.value=this.value.toUpperCase()">
+          <datalist id="symbolList"></datalist>
+          <span class="form-error" id="errSymbol"></span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Sector</label>
+          <select id="fSector" class="form-input">
+            <option value="">Select Sector</option>
+            <option>Banks</option>
+            <option>Fertilizer</option>
+            <option>Cement</option>
+            <option>Oil &amp; Gas</option>
+            <option>Technology</option>
+            <option>Textile</option>
+            <option>Power</option>
+            <option>Pharma</option>
+            <option>Auto</option>
+            <option>Insurance</option>
+            <option>Steel</option>
+            <option>Sugar</option>
+            <option>Chemical</option>
+            <option>Food</option>
+            <option>Other</option>
+          </select>
+          <span class="form-error" id="errSector"></span>
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="lblShares">Shares</label>
+          <input type="number" id="fShares" class="form-input mono" placeholder="0" min="0.01" step="0.01">
+          <span class="form-error" id="errShares"></span>
+        </div>
+        <div class="form-group">
+          <label class="form-label" id="lblPrice">Price Per Share (PKR)</label>
+          <input type="number" id="fPrice" class="form-input mono" placeholder="0.00" min="0.01" step="0.01">
+          <span class="form-error" id="errPrice"></span>
+        </div>
+        <div class="form-group" id="commissionGroup">
+          <label class="form-label">Commission (PKR)</label>
+          <input type="number" id="fCommission" class="form-input mono" placeholder="0.00" min="0" step="0.01" value="0">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input type="date" id="fDate" class="form-input">
+          <span class="form-error" id="errDate"></span>
+        </div>
+        <div class="form-group full">
+          <label class="form-label">Notes (optional)</label>
+          <input type="text" id="fNotes" class="form-input" placeholder="e.g. Initial position, earnings play...">
+        </div>
+        <div class="form-group full" id="sellValidation" style="display:none">
+          <div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--amber)">
+            <strong>Available shares:</strong> <span id="availableShares">0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" onclick="closeModal()">Cancel</button>
+      <button class="btn btn-primary" id="submitTxBtn" onclick="submitTransaction()">Add Transaction</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── SETTINGS PANEL ─────────────────────────────────────────── -->
+<div class="settings-panel" id="settingsPanel">
+  <div class="settings-hd">
+    <div style="font-size:16px;font-weight:600">Settings</div>
+    <button class="btn btn-icon btn-sm" onclick="closeSettings()">✕</button>
+  </div>
+  <div class="settings-body">
+
+    <div class="settings-section">
+      <div class="settings-label">Cost Method</div>
+      <div class="radio-group">
+        <div class="radio-opt" id="roWA" onclick="setCostMethod('weightedAvg')">
+          <div class="radio-dot"></div>
+          <div>
+            <div class="radio-name">Weighted Average</div>
+            <div class="radio-desc">Avg cost recalculated on each buy</div>
+          </div>
+        </div>
+        <div class="radio-opt" id="roFIFO" onclick="setCostMethod('fifo')">
+          <div class="radio-dot"></div>
+          <div>
+            <div class="radio-name">FIFO</div>
+            <div class="radio-desc">First purchased shares sold first</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Preferences</div>
+      <div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-name">Include Commission in Cost</div>
+            <div class="toggle-desc">Adds brokerage to avg cost basis</div>
+          </div>
+          <div class="toggle-switch" id="toggleCommission" onclick="toggleSetting('includeCommission')"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Manual Price Overrides</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">Enter prices manually when live fetch fails</div>
+      <div class="manual-price-list" id="manualPriceList"></div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Data</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn" style="width:100%;justify-content:center" onclick="loadSampleData()">
+          📊 Reset to CDC Import
+        </button>
+        <button class="btn btn-danger" style="width:100%;justify-content:center" onclick="confirmClearAll()">
+          🗑 Clear All Data
+        </button>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- ── TOAST CONTAINER ────────────────────────────────────────── -->
+<div class="toast-wrap" id="toastWrap"></div>
+
+<!-- ═══════════════════════════════════════════════════════════════
+     JAVASCRIPT
+════════════════════════════════════════════════════════════════ -->
+<script>
+'use strict';
+
+/* ══════════════════════════════════════════════════════
+   CONSTANTS
+══════════════════════════════════════════════════════ */
+const STORAGE_KEY = 'psxPortfolio_v3';
+const CORS_PROXIES = [
+  url => 'https://proxy.cors.sh/' + url,
+  url => 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url)
+];
+const CHART_PALETTE = [
+  '#1a56db','#0a6e42','#b91c1c','#92400e','#6d28d9',
+  '#0369a1','#be5000','#047481','#1e40af','#065f46',
+  '#7c3aed','#9f1239'
+];
+
+// CDC Account Balance Report — Mr. SARFRAZ AHMED — 25/06/2026
+// Buy price set to 1.00 PKR as placeholder. Delete each entry and
+// re-add with your actual buy price to get correct cost basis / P&L.
+const SAMPLE_TRANSACTIONS = [
+  {id:'p1', type:'buy', symbol:'EFERT', sector:'Fertilizer', shares:600,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p2', type:'buy', symbol:'FCCL',  sector:'Cement',     shares:1100, price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p3', type:'buy', symbol:'FFC',   sector:'Fertilizer', shares:300,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p4', type:'buy', symbol:'ILP',   sector:'Textile',    shares:300,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p5', type:'buy', symbol:'LUCK',  sector:'Cement',     shares:400,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p6', type:'buy', symbol:'MARI',  sector:'Oil & Gas',  shares:275,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p7', type:'buy', symbol:'MLCF',  sector:'Cement',     shares:500,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p8', type:'buy', symbol:'MTL',   sector:'Auto',       shares:240,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p9', type:'buy', symbol:'OGDC',  sector:'Oil & Gas',  shares:500,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p10',type:'buy', symbol:'PAEL',  sector:'Technology', shares:1100, price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p11',type:'buy', symbol:'SLM',   sector:'Auto',       shares:2000, price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p12',type:'buy', symbol:'SPSL',  sector:'Oil & Gas',  shares:1100, price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+  {id:'p13',type:'buy', symbol:'SYS',   sector:'Technology', shares:500,  price:1.00, commission:0, date:'2026-06-25', notes:'CDC import — update buy price'},
+];
+
+// No prices pre-loaded — use Settings → Manual Price Overrides or click Refresh Prices
+const SAMPLE_PRICES = {};
+
+/*
+ * ANALYST SIGNALS — Fundamental + Technical + Sector Analysis
+ * Basis: PSX historical performance, sector dynamics, macro outlook (PKR, rates, energy costs),
+ *        earnings trajectory, dividend yield, liquidity, and relative valuation vs peers.
+ * Confidence: high (3 dots) | medium (2 dots) | low (1 dot)
+ * Note: signals reflect long-term analytical view, NOT short-term trading calls.
+ */
+const ANALYST_SIGNALS = {
+  EFERT: {
+    signal: 'HOLD', conf: 'medium',
+    rationale: 'Engro Fertilizers: Solid dividend payer with ~10–12% yield history. Urea demand supported by agriculture subsidy cycle. Key risk: gas curtailment raises input costs and cuts production. Valuation is fair; wait for clarity on gas allocation before adding.',
+    factors: ['Dividend yield attractive', 'Gas supply risk', 'Agri demand steady', 'Cyclical urea pricing']
+  },
+  FCCL: {
+    signal: 'HOLD', conf: 'low',
+    rationale: 'Fauji Cement: Smaller player in a heavily oversupplied cement market. High energy (coal/gas) costs compress margins. Exports to Afghanistan constrained by border policies. No near-term re-rating catalyst visible. Hold for dividend; avoid adding.',
+    factors: ['Sector oversupply persists', 'High energy cost base', 'Export route challenges', 'Limited growth catalyst']
+  },
+  FFC: {
+    signal: 'BUY', conf: 'high',
+    rationale: 'Fauji Fertilizer: Pakistan\'s largest urea producer with a ~25–30% market share. Consistently pays 60–80% of earnings as dividends — one of the most reliable income stocks on PSX. Strong balance sheet, low debt. Fertilizer demand structurally underpinned by crop-support programs. Preferred pick in the fertilizer space over EFERT.',
+    factors: ['Sector-leading dividend yield', 'Dominant market share', 'Low debt / strong FCF', 'Agri policy tailwinds']
+  },
+  ILP: {
+    signal: 'BUY', conf: 'medium',
+    rationale: 'Interloop: Niche export-oriented manufacturer (hosiery/socks) with global brands as clients (Nike, Adidas, H&M). Dollar revenues act as a natural PKR depreciation hedge. Expanding capacity in Bangladesh diversifies risk. Valuation reasonable vs regional peers. Watch for global demand slowdown and energy cost pressures.',
+    factors: ['Dollar revenue hedge', 'Global brand clientele', 'Capacity expansion ongoing', 'Watch global demand cycle']
+  },
+  LUCK: {
+    signal: 'BUY', conf: 'high',
+    rationale: 'Lucky Cement: Conglomerate discount understates true value — Iraq cement operations add significant offshore earnings. Diversification into pharma (ICI Pakistan), chemicals, and power gives resilience cement-only peers lack. Premium management quality, strong FCF. One of the most liquid large-caps on KSE-100.',
+    factors: ['Iraq ops = offshore USD earnings', 'Conglomerate diversification', 'Sector-best management', 'KSE-100 index weight support']
+  },
+  MARI: {
+    signal: 'BUY', conf: 'high',
+    rationale: 'Mari Energies: E&P company with one of Pakistan\'s largest gas field concessions. Rising production volumes, strong cash generation, and consistent dividend payouts. Government gas pricing reforms are a tailwind. Unlike OGDC, MARI has lower circular-debt exposure and faster cash collection. High-conviction hold in the energy space.',
+    factors: ['Strong production growth', 'Lower circular debt risk vs OGDC', 'Consistent dividends', 'Gas pricing reform tailwind']
+  },
+  MLCF: {
+    signal: 'HOLD', conf: 'low',
+    rationale: 'Maple Leaf Cement: Mid-tier cement producer facing same sector headwinds (oversupply, high energy costs) as peers but with a higher cost base. Expansion plans risk further diluting returns in a soft-demand environment. Limited export capability. Suitable as a trading vehicle but not a conviction long-term hold.',
+    factors: ['Sector-wide oversupply', 'Cost base above peers', 'Expansion risk in weak mkt', 'Short-term trade only']
+  },
+  MTL: {
+    signal: 'BUY', conf: 'high',
+    rationale: 'Millat Tractors: Near-monopoly in Pakistan\'s agricultural tractor market (~60% share). Agriculture mechanisation is a multi-decade structural theme. Excellent ROE (30%+), high dividend yield, minimal debt. Volumes track crop-support subsidies closely — watch for government subsidy announcements as a catalyst. One of the highest-quality small-cap franchises on PSX.',
+    factors: ['~60% market share monopoly', 'ROE consistently 30%+', 'Agri-mech structural trend', 'High dividend yield']
+  },
+  OGDC: {
+    signal: 'HOLD', conf: 'medium',
+    rationale: 'OGDC: State-owned E&P giant with attractive headline yield but chronic circular-debt receivables inflate reported earnings. Cash collection lags significantly. Government ownership adds political risk to dividend decisions. At current valuations the yield is compelling IF circular debt resolution accelerates — treat as a dividend watch, not a growth story.',
+    factors: ['Circular debt receivables risk', 'State ownership limits agility', 'High nominal dividend yield', 'Resolution pathway uncertain']
+  },
+  PAEL: {
+    signal: 'HOLD', conf: 'low',
+    rationale: 'Pak Elektron: Consumer appliances and power equipment. Appliance demand highly sensitive to purchasing power — inflation and high interest rates have suppressed volumes. Power division (transformers, meters) benefits from DISCO capex but collection issues mirror OGDC. Mixed outlook; wait for consumer demand recovery signals.',
+    factors: ['Consumer demand under pressure', 'Power division DISCO risk', 'Inflation squeezing real income', 'Await demand recovery']
+  },
+  SLM: {
+    signal: 'HOLD', conf: 'low',
+    rationale: 'Service Long March Tyres: Tyre manufacturer exposed to automotive and commercial vehicle cycles, both of which have been weak. Raw material (rubber, carbon black) costs are dollar-linked. CPEC logistics recovery could revive truck tyre demand. Limited analyst coverage makes valuation opaque. Hold pending sector recovery.',
+    factors: ['Auto sector cycle weakness', 'Dollar-linked input costs', 'CPEC logistics potential', 'Low analyst coverage']
+  },
+  SPSL: {
+    signal: 'SELL', conf: 'low',
+    rationale: 'Sitara Petroleum Service: Small-cap oil field services company with low liquidity, thin float, and limited earnings transparency. Oilfield services revenues are lumpy and contract-dependent. Macro headwinds for domestic E&P capex spending. Difficult to value reliably; consider rotating capital into higher-conviction names (FFC, LUCK, MARI, SYS).',
+    factors: ['Low float / poor liquidity', 'Lumpy contract revenues', 'E&P capex headwinds', 'Better alternatives available']
+  },
+  SYS: {
+    signal: 'BUY', conf: 'high',
+    rationale: 'Systems Limited: Pakistan\'s premier IT services exporter. Revenues denominated primarily in USD (natural PKR hedge). Consistent 20–25% EPS CAGR over 5 years. Blue-chip client roster, expanding offshore delivery. IT sector benefits from government STZA incentives and low effective tax rates. The highest-quality growth franchise on PSX — core long-term holding.',
+    factors: ['USD revenue / PKR hedge', '20-25% EPS CAGR history', 'STZA tax incentives', 'Premium growth franchise']
+  },
+};
+
+/* ══════════════════════════════════════════════════════
+   STATE
+══════════════════════════════════════════════════════ */
+let state = {
+  transactions: [],
+  settings: {
+    costMethod: 'weightedAvg',
+    includeCommission: true,
+    manualPrices: {}
+  },
+  prices: {}
+};
+
+let chartInstances = {};
+
+/* ══════════════════════════════════════════════════════
+   STORAGE
+   Ledger + settings live server-side now (per-user, in the DB) — loaded via the
+   API on init and mutated via targeted endpoint calls, not a blanket local save.
+   state.prices stays client-only (it's just a market-data cache, re-fetched from
+   PSX on demand), cached in localStorage under a separate key purely for instant
+   paint before the next live refresh.
+══════════════════════════════════════════════════════ */
+const PRICES_CACHE_KEY = 'psxPricesCache_v1';
+
+// Returns false (and redirects to the login page) if the session isn't authenticated.
+async function loadState() {
+  loadPricesCache();
+  try {
+    const [ledgerRes, settingsRes] = await Promise.all([
+      fetch('/api/ledger', { credentials: 'include' }),
+      fetch('/api/settings', { credentials: 'include' })
+    ]);
+    if (ledgerRes.status === 401 || settingsRes.status === 401) {
+      location.href = '/login.html';
+      return false;
+    }
+    state.transactions = (await ledgerRes.json()).map(t => ({
+      ...t,
+      shares: parseFloat(t.shares),
+      price: parseFloat(t.price),
+      commission: parseFloat(t.commission)
+    }));
+    state.settings = Object.assign({
+      costMethod: 'weightedAvg',
+      includeCommission: true,
+      manualPrices: {}
+    }, await settingsRes.json());
+  } catch(e) {
+    console.warn('State load error', e);
+    toast('Could not load your portfolio from the server', 'error');
+  }
+  return true;
+}
+
+function loadPricesCache() {
+  try {
+    const raw = localStorage.getItem(PRICES_CACHE_KEY);
+    state.prices = raw ? JSON.parse(raw) : {};
+  } catch(e) { state.prices = {}; }
+}
+
+function savePricesCache() {
+  try { localStorage.setItem(PRICES_CACHE_KEY, JSON.stringify(state.prices)); } catch(e) {}
+}
+
+/* ══════════════════════════════════════════════════════
+   HOLDINGS COMPUTATION — WEIGHTED AVERAGE
+══════════════════════════════════════════════════════ */
+function computeHoldingsWA() {
+  const holdings = {};
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+
+  for (const tx of sorted) {
+    const sym = tx.symbol;
+    const comm = state.settings.includeCommission ? tx.commission : 0;
+
+    if (tx.type === 'buy') {
+      if (!holdings[sym]) {
+        holdings[sym] = { shares:0, totalCost:0, sector:tx.sector, symbol:sym };
+      }
+      holdings[sym].totalCost += tx.shares * tx.price + comm;
+      holdings[sym].shares += tx.shares;
+    } else {
+      if (holdings[sym] && holdings[sym].shares > 0) {
+        const avgCost = holdings[sym].totalCost / holdings[sym].shares;
+        const sellComm = state.settings.includeCommission ? tx.commission : 0;
+        holdings[sym].totalCost = Math.max(0, holdings[sym].totalCost - avgCost * tx.shares);
+        holdings[sym].shares -= tx.shares;
+        if (holdings[sym].shares <= 1e-9) {
+          delete holdings[sym];
+        }
+      }
+    }
+  }
+
+  for (const sym in holdings) {
+    const h = holdings[sym];
+    h.avgCost = h.shares > 0 ? h.totalCost / h.shares : 0;
+  }
+
+  return holdings;
+}
+
+/* ══════════════════════════════════════════════════════
+   HOLDINGS COMPUTATION — FIFO
+══════════════════════════════════════════════════════ */
+function computeHoldingsFIFO() {
+  const lots = {};
+  const holdings = {};
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+
+  for (const tx of sorted) {
+    const sym = tx.symbol;
+    const comm = state.settings.includeCommission ? tx.commission : 0;
+
+    if (tx.type === 'buy') {
+      if (!lots[sym]) lots[sym] = [];
+      const costPerShare = (tx.shares * tx.price + comm) / tx.shares;
+      lots[sym].push({ shares: tx.shares, costPerShare });
+
+      if (!holdings[sym]) {
+        holdings[sym] = { shares:0, totalCost:0, sector:tx.sector, symbol:sym };
+      }
+      holdings[sym].shares += tx.shares;
+      holdings[sym].totalCost += tx.shares * costPerShare;
+
+    } else {
+      if (!lots[sym]) continue;
+      let remaining = tx.shares;
+      let costConsumed = 0;
+
+      while (remaining > 1e-9 && lots[sym].length > 0) {
+        const lot = lots[sym][0];
+        if (lot.shares <= remaining + 1e-9) {
+          costConsumed += lot.shares * lot.costPerShare;
+          remaining -= lot.shares;
+          lots[sym].shift();
+        } else {
+          costConsumed += remaining * lot.costPerShare;
+          lot.shares -= remaining;
+          remaining = 0;
+        }
+      }
+
+      if (holdings[sym]) {
+        holdings[sym].shares = Math.max(0, holdings[sym].shares - tx.shares);
+        holdings[sym].totalCost = Math.max(0, holdings[sym].totalCost - costConsumed);
+        if (holdings[sym].shares <= 1e-9) {
+          delete holdings[sym];
+        }
+      }
+    }
+  }
+
+  for (const sym in holdings) {
+    const h = holdings[sym];
+    h.avgCost = h.shares > 0 ? h.totalCost / h.shares : 0;
+  }
+
+  return holdings;
+}
+
+function computeHoldings() {
+  return state.settings.costMethod === 'fifo'
+    ? computeHoldingsFIFO()
+    : computeHoldingsWA();
+}
+
+/* ══════════════════════════════════════════════════════
+   AVAILABLE SHARES FOR SELL VALIDATION
+══════════════════════════════════════════════════════ */
+function getAvailableShares(symbol) {
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+  let shares = 0;
+  for (const tx of sorted) {
+    if (tx.symbol !== symbol) continue;
+    if (tx.type === 'buy') shares += tx.shares;
+    else shares -= tx.shares;
+  }
+  return Math.max(0, shares);
+}
+
+/* ══════════════════════════════════════════════════════
+   REALIZED P&L
+══════════════════════════════════════════════════════ */
+function computeRealizedPL() {
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const bySymbol = {};
+  let total = 0;
+
+  if (state.settings.costMethod === 'fifo') {
+    const lots = {};
+    for (const tx of sorted) {
+      const sym = tx.symbol;
+      const comm = state.settings.includeCommission ? tx.commission : 0;
+
+      if (tx.type === 'buy') {
+        if (!lots[sym]) lots[sym] = [];
+        const cps = (tx.shares * tx.price + comm) / tx.shares;
+        lots[sym].push({ shares: tx.shares, costPerShare: cps });
+      } else {
+        if (!lots[sym]) continue;
+        if (!bySymbol[sym]) bySymbol[sym] = { realized:0, symbol:sym };
+        let remaining = tx.shares;
+        const sellComm = state.settings.includeCommission ? tx.commission : 0;
+        const grossProceeds = tx.shares * tx.price - sellComm;
+        let costBasis = 0;
+
+        while (remaining > 1e-9 && lots[sym].length > 0) {
+          const lot = lots[sym][0];
+          if (lot.shares <= remaining + 1e-9) {
+            costBasis += lot.shares * lot.costPerShare;
+            remaining -= lot.shares;
+            lots[sym].shift();
+          } else {
+            costBasis += remaining * lot.costPerShare;
+            lot.shares -= remaining;
+            remaining = 0;
+          }
+        }
+        const realized = grossProceeds - costBasis;
+        bySymbol[sym].realized += realized;
+        total += realized;
+      }
+    }
+  } else {
+    // WA method
+    const runningAvg = {};
+    for (const tx of sorted) {
+      const sym = tx.symbol;
+      const comm = state.settings.includeCommission ? tx.commission : 0;
+
+      if (tx.type === 'buy') {
+        if (!runningAvg[sym]) runningAvg[sym] = { shares:0, totalCost:0 };
+        runningAvg[sym].totalCost += tx.shares * tx.price + comm;
+        runningAvg[sym].shares += tx.shares;
+      } else {
+        if (!runningAvg[sym] || runningAvg[sym].shares < 1e-9) continue;
+        if (!bySymbol[sym]) bySymbol[sym] = { realized:0, symbol:sym };
+
+        const avgCost = runningAvg[sym].totalCost / runningAvg[sym].shares;
+        const sellComm = state.settings.includeCommission ? tx.commission : 0;
+        const proceeds = tx.shares * tx.price - sellComm;
+        const cost = tx.shares * avgCost;
+        const realized = proceeds - cost;
+
+        bySymbol[sym].realized += realized;
+        total += realized;
+
+        runningAvg[sym].totalCost = Math.max(0, runningAvg[sym].totalCost - cost);
+        runningAvg[sym].shares = Math.max(0, runningAvg[sym].shares - tx.shares);
+      }
+    }
+  }
+
+  return { bySymbol, total };
+}
+
+/* ══════════════════════════════════════════════════════
+   ENRICHED HOLDINGS (with prices)
+══════════════════════════════════════════════════════ */
+function getEnrichedHoldings() {
+  const holdings = computeHoldings();
+  const result = [];
+  let totalMktValue = 0;
+  let totalCostBasis = 0;
+
+  for (const sym in holdings) {
+    const h = holdings[sym];
+    const p = state.prices[sym];
+    const mktPrice = p ? p.price : null;
+    const mktValue = mktPrice != null ? mktPrice * h.shares : null;
+    const unrealizedPL = mktValue != null ? mktValue - h.totalCost : null;
+    const returnPct = unrealizedPL != null && h.totalCost > 0
+      ? (unrealizedPL / h.totalCost) * 100 : null;
+    const dayChange = p && p.change != null ? p.change * h.shares : null;
+    const dayChangePct = p && p.changePct != null ? p.changePct : null;
+
+    if (mktValue != null) totalMktValue += mktValue;
+    else totalMktValue += h.totalCost;
+    totalCostBasis += h.totalCost;
+
+    result.push({
+      symbol: sym,
+      sector: h.sector,
+      shares: h.shares,
+      avgCost: h.avgCost,
+      totalCost: h.totalCost,
+      mktPrice,
+      mktValue: mktValue != null ? mktValue : h.totalCost,
+      unrealizedPL,
+      returnPct,
+      dayChange,
+      dayChangePct,
+      priceStatus: p ? p.status : 'none',
+      priceUpdatedAt: p ? p.updatedAt : null,
+    });
+  }
+
+  // Weight calculation
+  for (const h of result) {
+    h.weight = totalMktValue > 0 ? (h.mktValue / totalMktValue) * 100 : 0;
+  }
+
+  return { holdings: result, totalMktValue, totalCostBasis };
+}
+
+/* ══════════════════════════════════════════════════════
+   PRICE FETCHING
+══════════════════════════════════════════════════════ */
+async function fetchWithProxy(url, proxyIdx = 0) {
+  if (proxyIdx >= CORS_PROXIES.length) throw new Error('All proxies exhausted');
+  const proxyUrl = CORS_PROXIES[proxyIdx](url);
+  const res = await fetch(proxyUrl, { signal: AbortSignal.timeout(6000) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res;
+}
+
+async function fetchPSXMarketWatch(symbols) {
+  const url = `https://dps.psx.com.pk/market-watch`;
+  const wanted = new Set(symbols.map(s => s.toUpperCase()));
+  for (let i = 0; i < CORS_PROXIES.length; i++) {
+    try {
+      const res = await fetchWithProxy(url, i);
+      const html = await res.text();
+      const doc = new DOMParser().parseFromString(html, 'text/html');
+      const rows = doc.querySelectorAll('table.tbl tbody tr');
+      const results = {};
+      for (const row of rows) {
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 10) continue;
+        const sym = (cells[0].getAttribute('data-search') || cells[0].textContent).trim().toUpperCase();
+        if (!wanted.has(sym)) continue;
+        const price = parseFloat(cells[7].getAttribute('data-order'));
+        const change = parseFloat(cells[8].getAttribute('data-order'));
+        const changePct = parseFloat(cells[9].getAttribute('data-order'));
+        if (price > 0) {
+          results[sym] = { price, change: change || 0, changePct: changePct || 0, status: 'live', updatedAt: Date.now() };
+        }
+      }
+      if (Object.keys(results).length > 0) return results;
+    } catch(e) { continue; }
+  }
+  return {};
+}
+
+/* ══════════════════════════════════════════════════════
+   SYMBOL DIRECTORY (PSX scripts, for Add Transaction autocomplete)
+══════════════════════════════════════════════════════ */
+const SYMBOLS_CACHE_KEY = 'psxSymbolsCache_v1';
+const SYMBOLS_CACHE_TTL = 24 * 60 * 60 * 1000;
+
+let psxSymbolsMap = {}; // SYMBOL -> { name, sector }
+
+const PSX_SECTOR_MAP = [
+  [['BANK'], 'Banks'],
+  [['FERTILIZER'], 'Fertilizer'],
+  [['CEMENT'], 'Cement'],
+  [['OIL & GAS', 'REFINERY'], 'Oil & Gas'],
+  [['TECHNOLOGY'], 'Technology'],
+  [['TEXTILE', 'APPAREL', 'JUTE', 'SYNTHETIC', 'WOOLLEN'], 'Textile'],
+  [['POWER'], 'Power'],
+  [['PHARMA'], 'Pharma'],
+  [['AUTOMOBILE'], 'Auto'],
+  [['INSURANCE'], 'Insurance'],
+  [['ENGINEERING'], 'Steel'],
+  [['SUGAR'], 'Sugar'],
+  [['CHEMICAL'], 'Chemical'],
+  [['FOOD', 'VANASPATI'], 'Food'],
+];
+
+function mapPsxSectorToAppSector(sectorName) {
+  const s = (sectorName || '').toUpperCase();
+  for (const [keys, sector] of PSX_SECTOR_MAP) {
+    if (keys.some(k => s.includes(k))) return sector;
+  }
+  return 'Other';
+}
+
+function applySymbolList(list) {
+  psxSymbolsMap = {};
+  const opts = [];
+  for (const item of list) {
+    const sym = (item.symbol || '').toUpperCase();
+    if (!sym || item.isDebt) continue;
+    psxSymbolsMap[sym] = { name: item.name || '', sector: mapPsxSectorToAppSector(item.sectorName) };
+    const label = (item.name || '').replace(/"/g, '&quot;');
+    opts.push(`<option value="${sym}">${sym} — ${label}</option>`);
+  }
+  const datalist = document.getElementById('symbolList');
+  if (datalist) datalist.innerHTML = opts.join('');
+}
+
+async function fetchPsxSymbolList() {
+  const url = `https://dps.psx.com.pk/symbols`;
+  for (let i = 0; i < CORS_PROXIES.length; i++) {
+    try {
+      const res = await fetchWithProxy(url, i);
+      const data = await res.json();
+      if (Array.isArray(data) && data.length > 0) return data;
+    } catch(e) { continue; }
+  }
+  return null;
+}
+
+async function loadPsxSymbols() {
+  try {
+    const cached = JSON.parse(localStorage.getItem(SYMBOLS_CACHE_KEY) || 'null');
+    if (cached && Array.isArray(cached.list) && cached.list.length > 0) {
+      applySymbolList(cached.list);
+      if (Date.now() - cached.fetchedAt < SYMBOLS_CACHE_TTL) return;
+    }
+  } catch(e) {}
+
+  const list = await fetchPsxSymbolList();
+  if (list && list.length > 0) {
+    applySymbolList(list);
+    try {
+      localStorage.setItem(SYMBOLS_CACHE_KEY, JSON.stringify({ list, fetchedAt: Date.now() }));
+    } catch(e) {}
+  }
+}
+
+function handleSymbolInput() {
+  const sym = (document.getElementById('fSymbol')?.value || '').trim().toUpperCase();
+  const match = psxSymbolsMap[sym];
+  if (match) document.getElementById('fSector').value = match.sector;
+  updateSellAvailable();
+}
+
+let isFetching = false;
+
+async function refreshPrices() {
+  if (isFetching) return;
+  isFetching = true;
+
+  const dot = document.getElementById('statusDot');
+  const icon = document.getElementById('refreshIcon');
+  const btn = document.getElementById('btnRefresh');
+  dot.className = 'status-dot fetching';
+  icon.className = 'spin';
+  btn.disabled = true;
+
+  const symbols = [...new Set(
+    state.transactions.map(t => t.symbol)
+  )];
+
+  if (symbols.length === 0) {
+    toast('No symbols to fetch', 'info');
+    isFetching = false;
+    icon.className = '';
+    icon.textContent = '↻';
+    btn.disabled = false;
+    return;
+  }
+
+  let fetched = 0;
+  let failed = 0;
+
+  // PSX market-watch covers every symbol in one request
+  try {
+    const bulk = await fetchPSXMarketWatch(symbols);
+    for (const [sym, d] of Object.entries(bulk)) {
+      state.prices[sym] = d;
+      fetched++;
+    }
+  } catch(e) {}
+
+  // Anything not returned (delisted/typo/proxy miss) falls back to manual override
+  const missing = symbols.filter(s => !state.prices[s] || state.prices[s].status !== 'live');
+  for (const sym of missing) {
+    if (state.settings.manualPrices[sym] != null) {
+      state.prices[sym] = {
+        price: state.settings.manualPrices[sym],
+        change: state.prices[sym]?.change || 0,
+        changePct: state.prices[sym]?.changePct || 0,
+        status: 'manual',
+        updatedAt: Date.now()
+      };
+    }
+    failed++;
+  }
+
+  savePricesCache();
+  renderAll();
+
+  const ts = new Date().toLocaleTimeString();
+  document.getElementById('lastUpdated').textContent = ts;
+  dot.className = failed < symbols.length ? 'status-dot live' : 'status-dot';
+  icon.className = '';
+  icon.textContent = '↻';
+  btn.disabled = false;
+  isFetching = false;
+
+  if (fetched > 0) {
+    toast(`Prices updated: ${fetched} live, ${failed} fallback`, 'success');
+  } else {
+    toast(`Live fetch failed — using manual prices`, 'warning');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER — KPIs
+══════════════════════════════════════════════════════ */
+function renderKPIs() {
+  const { holdings, totalMktValue, totalCostBasis } = getEnrichedHoldings();
+
+  const totalUnrealized = holdings.reduce((a, h) => a + (h.unrealizedPL || 0), 0);
+  const totalDayChange  = holdings.reduce((a, h) => a + (h.dayChange || 0), 0);
+  const totalDayPct     = totalMktValue > 0 ? (totalDayChange / totalMktValue) * 100 : 0;
+  const unrealizedPct   = totalCostBasis > 0 ? (totalUnrealized / totalCostBasis) * 100 : 0;
+
+  const withReturn = holdings.filter(h => h.returnPct != null);
+  const best  = withReturn.length ? withReturn.reduce((a,b) => a.returnPct > b.returnPct ? a : b) : null;
+  const worst = withReturn.length ? withReturn.reduce((a,b) => a.returnPct < b.returnPct ? a : b) : null;
+
+  setText('kv-total',  holdings.length ? fPKR(totalMktValue) : '—');
+  setText('kv-cost',   holdings.length ? fPKR(totalCostBasis) : '—');
+  setText('kv-upnl',   holdings.length ? fPKR(totalUnrealized, true) : '—');
+  setText('kv-upnl-pct', holdings.length ? fPct(unrealizedPct, true) : '—');
+  setText('kv-day',    holdings.length ? fPKR(totalDayChange, true) : '—');
+  setText('kv-day-pct', holdings.length ? fPct(totalDayPct, true) : '—');
+  setText('kv-pos',    holdings.length.toString());
+  setText('kv-best-sym',  best  ? best.symbol  : '—');
+  setText('kv-best-pct',  best  ? fPct(best.returnPct, true)  : '—');
+  setText('kv-worst-sym', worst ? worst.symbol : '—');
+  setText('kv-worst-pct', worst ? fPct(worst.returnPct, true) : '—');
+
+  // Color KPI cards
+  colorKPI('kpiUnrealized', totalUnrealized);
+  colorKPI('kpiDayChg', totalDayChange);
+
+  // Method label
+  const ml = document.getElementById('methodLabel');
+  if (ml) ml.textContent = state.settings.costMethod === 'fifo' ? 'FIFO' : 'WA Cost';
+}
+
+function colorKPI(id, value) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.classList.remove('green','red');
+  if (value > 0) el.classList.add('green');
+  else if (value < 0) el.classList.add('red');
+
+  const valEl = el.querySelector('.kpi-val');
+  if (valEl) {
+    valEl.className = 'kpi-val ' + (value > 0 ? 'val-pos' : value < 0 ? 'val-neg' : '');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   ANALYST SIGNAL CELL RENDERER
+══════════════════════════════════════════════════════ */
+function renderSignalCell(symbol) {
+  const sig = ANALYST_SIGNALS[symbol];
+  if (!sig) {
+    return `<span style="color:var(--txt3);font-size:11px">—</span>`;
+  }
+
+  const icons = { BUY:'▲', HOLD:'◆', SELL:'▼' };
+  const confDots = `
+    <div class="signal-conf ${sig.conf}">
+      <span class="dot1" style="color:${sig.signal==='BUY'?'var(--green)':sig.signal==='SELL'?'var(--red)':'var(--amber)'}"></span>
+      <span class="dot2" style="color:${sig.signal==='BUY'?'var(--green)':sig.signal==='SELL'?'var(--red)':'var(--amber)'}"></span>
+      <span class="dot3" style="color:${sig.signal==='BUY'?'var(--green)':sig.signal==='SELL'?'var(--red)':'var(--amber)'}"></span>
+    </div>`;
+
+  const tooltip = [sig.rationale, '', 'Key factors: ' + sig.factors.join(' | ')]
+    .join('\n').replace(/'/g, '&#39;');
+
+  return `<div class="signal" title="${tooltip}">
+    <span class="signal-badge ${sig.signal.toLowerCase()}">${icons[sig.signal]} ${sig.signal}</span>
+    ${confDots}
+  </div>`;
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER — HOLDINGS TABLE
+══════════════════════════════════════════════════════ */
+function renderHoldingsTable() {
+  const { holdings } = getEnrichedHoldings();
+  const tbody = document.getElementById('holdingsTbody');
+  const sortSel = document.getElementById('holdingSort');
+  const sortVal = sortSel ? sortSel.value : 'symbol';
+
+  document.getElementById('holdingsCount').textContent = holdings.length;
+
+  if (holdings.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="12">
+      <div class="empty-state">
+        <div class="es-icon">📊</div>
+        <p>No holdings yet — add the opening quantity and average cost of what you already own to get started.</p>
+        <button class="btn btn-sm btn-primary" onclick="openModalForOpeningPosition()">+ Add Opening Position</button>
+      </div>
+    </td></tr>`;
+    return;
+  }
+
+  let sorted = [...holdings];
+  switch (sortVal) {
+    case 'value-desc':  sorted.sort((a,b) => b.mktValue - a.mktValue); break;
+    case 'pnl-desc':    sorted.sort((a,b) => (b.unrealizedPL||0) - (a.unrealizedPL||0)); break;
+    case 'pct-desc':    sorted.sort((a,b) => (b.returnPct||0) - (a.returnPct||0)); break;
+    case 'weight-desc': sorted.sort((a,b) => b.weight - a.weight); break;
+    case 'signal': {
+      const rank = { BUY:0, HOLD:1, SELL:2 };
+      const crank = { high:0, medium:1, low:2 };
+      sorted.sort((a,b) => {
+        const sa = ANALYST_SIGNALS[a.symbol], sb = ANALYST_SIGNALS[b.symbol];
+        const ra = sa ? rank[sa.signal] : 3, rb = sb ? rank[sb.signal] : 3;
+        if (ra !== rb) return ra - rb;
+        const ca = sa ? crank[sa.conf] : 3, cb = sb ? crank[sb.conf] : 3;
+        return ca - cb;
+      });
+      break;
+    }
+    default: sorted.sort((a,b) => a.symbol.localeCompare(b.symbol));
+  }
+
+  const maxAbsPL  = Math.max(...holdings.map(h => Math.abs(h.unrealizedPL || 0)), 1);
+  const maxWeight = Math.max(...holdings.map(h => h.weight), 1);
+
+  tbody.innerHTML = sorted.map(h => {
+    const hasPL = h.unrealizedPL != null;
+    const rowClass = hasPL ? (h.unrealizedPL >= 0 ? 'row-green' : 'row-red') : '';
+    const plPct   = hasPL ? Math.min(100, Math.abs(h.unrealizedPL) / maxAbsPL * 100) : 0;
+    const wtPct   = Math.min(100, h.weight / maxWeight * 100);
+    const plColor = hasPL ? (h.unrealizedPL >= 0 ? 'var(--green)' : 'var(--red)') : 'var(--txt3)';
+    const statusHtml = `<span class="price-status ${h.priceStatus}">${h.priceStatus}</span>`;
+
+    const dayHtml = h.dayChange != null
+      ? `<span class="${h.dayChange >= 0 ? 'val-pos' : 'val-neg'}">${fPKR(h.dayChange, true)}</span><br>
+         <span class="val-neu" style="font-size:10px">${fPct(h.dayChangePct, true)}</span>`
+      : '<span class="val-neu">—</span>';
+
+    return `<tr class="${rowClass}">
+      <td style="text-align:left">
+        <span class="sym">${h.symbol}</span>${statusHtml}
+      </td>
+      <td style="text-align:left"><span class="sector-tag">${h.sector||'—'}</span></td>
+      <td>${fNum(h.shares)}</td>
+      <td>${fPKR(h.avgCost)}</td>
+      <td>${h.mktPrice != null ? fPKR(h.mktPrice) : '<span class="val-neu">No price</span>'}</td>
+      <td>${dayHtml}</td>
+      <td>${fPKR(h.totalCost)}</td>
+      <td>${fPKR(h.mktValue)}</td>
+      <td>
+        <div class="mini-bar-wrap">
+          <span class="${hasPL ? (h.unrealizedPL >= 0 ? 'val-pos':'val-neg') : 'val-neu'}">
+            ${hasPL ? fPKR(h.unrealizedPL, true) : '—'}
+          </span>
+          <div class="mini-bar"><div class="mini-bar-fill" style="width:${plPct}%;background:${plColor}"></div></div>
+        </div>
+      </td>
+      <td class="${h.returnPct != null ? (h.returnPct >= 0 ? 'val-pos':'val-neg') : 'val-neu'}">
+        ${h.returnPct != null ? fPct(h.returnPct, true) : '—'}
+      </td>
+      <td>
+        <div class="mini-bar-wrap">
+          <span class="val-neu">${fPct(h.weight)}</span>
+          <div class="mini-bar"><div class="mini-bar-fill" style="width:${wtPct}%;background:var(--accent)"></div></div>
+        </div>
+      </td>
+      <td style="text-align:center">${renderSignalCell(h.symbol)}</td>
+      <td style="text-align:center">
+        <button class="btn btn-sm" onclick="addTxForSymbol('${h.symbol}','${h.sector||''}')">+ Tx</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER — CHARTS
+══════════════════════════════════════════════════════ */
+const CHART_DEFAULTS = {
+  color: '#64748b',
+  grid: { color: 'rgba(13,24,41,.07)' },
+  border: { color: 'rgba(13,24,41,.10)' },
+  mono: { family: "'JetBrains Mono', monospace", size: 10 }
+};
+
+function destroyChart(id) {
+  if (chartInstances[id]) {
+    chartInstances[id].destroy();
+    delete chartInstances[id];
+  }
+}
+
+function axisStyle(extra = {}) {
+  return {
+    ticks: { color: CHART_DEFAULTS.color, font: CHART_DEFAULTS.mono, maxRotation: 0 },
+    grid: CHART_DEFAULTS.grid,
+    border: CHART_DEFAULTS.border,
+    ...extra
+  };
+}
+
+function renderCharts() {
+  const { holdings } = getEnrichedHoldings();
+
+  // ── 1. P&L Bar ──────────────────────────────────────────
+  destroyChart('plChart');
+  {
+    const syms = holdings.map(h => h.symbol);
+    const vals = holdings.map(h => h.unrealizedPL != null ? +h.unrealizedPL.toFixed(2) : 0);
+    const colors = vals.map(v => v >= 0 ? '#0a6e42' : '#b91c1c');
+    chartInstances.plChart = new Chart(document.getElementById('plChart'), {
+      type: 'bar',
+      data: {
+        labels: syms,
+        datasets: [{ data: vals, backgroundColor: colors, borderRadius: 3, borderSkipped: false }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => ` PKR ${fPKR(ctx.raw, true)}` } }
+        },
+        scales: { x: axisStyle(), y: axisStyle() }
+      }
+    });
+  }
+
+  // ── 2. Allocation Donut ──────────────────────────────────
+  destroyChart('allocChart');
+  if (holdings.length) {
+    chartInstances.allocChart = new Chart(document.getElementById('allocChart'), {
+      type: 'doughnut',
+      data: {
+        labels: holdings.map(h => h.symbol),
+        datasets: [{
+          data: holdings.map(h => +h.mktValue.toFixed(2)),
+          backgroundColor: CHART_PALETTE.slice(0, holdings.length),
+          borderColor: 'var(--card)', borderWidth: 2,
+          hoverOffset: 6
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position:'right', labels:{ color:'#64748b', font:{ size:11, family:"'Space Grotesk'" }, boxWidth:12 } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fPct(ctx.parsed / holdings.reduce((a,h)=>a+h.mktValue,0)*100)}` } }
+        },
+        cutout: '65%'
+      }
+    });
+  }
+
+  // ── 3. Cost vs Market Value Grouped Bar ──────────────────
+  destroyChart('costMktChart');
+  if (holdings.length) {
+    chartInstances.costMktChart = new Chart(document.getElementById('costMktChart'), {
+      type: 'bar',
+      data: {
+        labels: holdings.map(h => h.symbol),
+        datasets: [
+          { label: 'Cost Basis', data: holdings.map(h => +h.totalCost.toFixed(2)),
+            backgroundColor: 'rgba(26,86,219,.55)', borderRadius: 3 },
+          { label: 'Market Value', data: holdings.map(h => +h.mktValue.toFixed(2)),
+            backgroundColor: 'rgba(10,110,66,.55)', borderRadius: 3 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: '#8b949e', font: { size: 11, family:"'Space Grotesk'" } } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: PKR ${fPKR(ctx.raw)}` } }
+        },
+        scales: { x: axisStyle(), y: axisStyle() }
+      }
+    });
+  }
+
+  // ── 4. Sector Donut ──────────────────────────────────────
+  destroyChart('sectorChart');
+  if (holdings.length) {
+    const secMap = {};
+    for (const h of holdings) {
+      const s = h.sector || 'Other';
+      secMap[s] = (secMap[s] || 0) + h.mktValue;
+    }
+    const secLabels = Object.keys(secMap);
+    const secVals   = Object.values(secMap);
+    chartInstances.sectorChart = new Chart(document.getElementById('sectorChart'), {
+      type: 'doughnut',
+      data: {
+        labels: secLabels,
+        datasets: [{
+          data: secVals.map(v => +v.toFixed(2)),
+          backgroundColor: CHART_PALETTE.slice(0, secLabels.length),
+          borderColor: 'var(--card)', borderWidth: 2,
+          hoverOffset: 6
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position:'right', labels:{ color:'#64748b', font:{ size:11, family:"'Space Grotesk'" }, boxWidth:12 } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: PKR ${fPKR(ctx.raw)}` } }
+        },
+        cutout: '65%'
+      }
+    });
+  }
+
+  // ── 5. Cumulative P&L Line ───────────────────────────────
+  destroyChart('cumulChart');
+  {
+    const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+    if (sorted.length) {
+      // Build running WA holdings and estimate cumulative PL by date
+      const dates = [...new Set(sorted.map(t => t.date))].sort();
+      const points = [];
+      let runningHoldings = {};
+      let txIdx = 0;
+
+      for (const dt of dates) {
+        while (txIdx < sorted.length && sorted[txIdx].date <= dt) {
+          const tx = sorted[txIdx];
+          const comm = state.settings.includeCommission ? tx.commission : 0;
+          const sym  = tx.symbol;
+          if (tx.type === 'buy') {
+            if (!runningHoldings[sym]) runningHoldings[sym] = { shares:0, totalCost:0 };
+            runningHoldings[sym].totalCost += tx.shares * tx.price + comm;
+            runningHoldings[sym].shares += tx.shares;
+          } else {
+            if (runningHoldings[sym] && runningHoldings[sym].shares > 0) {
+              const avg = runningHoldings[sym].totalCost / runningHoldings[sym].shares;
+              runningHoldings[sym].totalCost = Math.max(0, runningHoldings[sym].totalCost - avg * tx.shares);
+              runningHoldings[sym].shares = Math.max(0, runningHoldings[sym].shares - tx.shares);
+            }
+          }
+          txIdx++;
+        }
+        // Estimate PL using current prices
+        let pl = 0;
+        for (const sym in runningHoldings) {
+          const rh = runningHoldings[sym];
+          if (rh.shares < 1e-9) continue;
+          const p = state.prices[sym];
+          if (p && p.price) {
+            pl += p.price * rh.shares - rh.totalCost;
+          }
+        }
+        points.push({ x: dt, y: +pl.toFixed(2) });
+      }
+
+      chartInstances.cumulChart = new Chart(document.getElementById('cumulChart'), {
+        type: 'line',
+        data: {
+          labels: points.map(p => p.x),
+          datasets: [{
+            data: points.map(p => p.y),
+            borderColor: '#1a56db',
+            backgroundColor: 'rgba(26,86,219,.06)',
+            fill: true, tension: 0.35, pointRadius: 3,
+            pointBackgroundColor: '#1a56db', borderWidth: 2,
+          }]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { display: false },
+            tooltip: { callbacks: { label: ctx => ` PKR ${fPKR(ctx.raw, true)}` } }
+          },
+          scales: {
+            x: axisStyle({ ticks: { color:'#64748b', font:CHART_DEFAULTS.mono, maxTicksLimit:8 } }),
+            y: axisStyle()
+          }
+        }
+      });
+    }
+  }
+
+  // ── 6. Bubble / Scatter ──────────────────────────────────
+  destroyChart('bubbleChart');
+  if (holdings.length) {
+    const maxMktVal = Math.max(...holdings.map(h => h.mktValue), 1);
+    chartInstances.bubbleChart = new Chart(document.getElementById('bubbleChart'), {
+      type: 'bubble',
+      data: {
+        datasets: holdings.map((h, i) => ({
+          label: h.symbol,
+          data: [{
+            x: +h.weight.toFixed(2),
+            y: +(h.returnPct || 0).toFixed(2),
+            r: Math.max(6, Math.sqrt(h.mktValue / maxMktVal) * 28)
+          }],
+          backgroundColor: (h.unrealizedPL || 0) >= 0
+            ? 'rgba(10,110,66,.45)' : 'rgba(185,28,28,.45)',
+          borderColor: (h.unrealizedPL || 0) >= 0 ? '#0a6e42' : '#b91c1c',
+          borderWidth: 1,
+        }))
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: {
+            callbacks: {
+              label: ctx => [
+                ` ${ctx.dataset.label}`,
+                ` Weight: ${fPct(ctx.parsed.x)}`,
+                ` Return: ${fPct(ctx.parsed.y, true)}`
+              ]
+            }
+          }
+        },
+        scales: {
+          x: { ...axisStyle(), title:{ display:true, text:'Portfolio Weight %', color:'#64748b', font:{size:10} } },
+          y: { ...axisStyle(), title:{ display:true, text:'Return %', color:'#64748b', font:{size:10} } }
+        }
+      }
+    });
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER — TOP MOVERS
+══════════════════════════════════════════════════════ */
+function renderTopMovers() {
+  const { holdings } = getEnrichedHoldings();
+  const withReturn = holdings.filter(h => h.returnPct != null);
+  const sorted = [...withReturn].sort((a,b) => b.returnPct - a.returnPct);
+  const gainers = sorted.slice(0, 3);
+  const losers  = sorted.slice(-3).reverse();
+
+  function moverRow(h) {
+    const cls = h.returnPct >= 0 ? 'val-pos' : 'val-neg';
+    return `<div class="mover-row">
+      <div class="mover-sym">${h.symbol}</div>
+      <div class="mover-vals">
+        <span class="${cls}">${fPct(h.returnPct, true)}</span><br>
+        <span class="val-neu" style="font-size:10px">PKR ${fPKR(h.unrealizedPL||0, true)}</span>
+      </div>
+    </div>`;
+  }
+
+  const gEl = document.getElementById('gainersBody');
+  const lEl = document.getElementById('losersBody');
+  if (gEl) gEl.innerHTML = gainers.length ? gainers.map(moverRow).join('') : '<div style="color:var(--txt3);font-size:12px;padding:8px 0">No data</div>';
+  if (lEl) lEl.innerHTML = losers.length ? losers.map(moverRow).join('') : '<div style="color:var(--txt3);font-size:12px;padding:8px 0">No data</div>';
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER — REALIZED P&L
+══════════════════════════════════════════════════════ */
+function renderRealizedPL() {
+  const { bySymbol, total } = computeRealizedPL();
+  const el = document.getElementById('realizedSection');
+  if (!el) return;
+
+  const sells = state.transactions.filter(t => t.type === 'sell');
+
+  if (sells.length === 0) {
+    el.innerHTML = `<div class="empty-state" style="padding:24px">
+      <div style="color:var(--txt3);font-size:13px">No sell transactions yet</div>
+    </div>`;
+    return;
+  }
+
+  const rows = Object.values(bySymbol).sort((a,b) => b.realized - a.realized);
+
+  el.innerHTML = `
+    <div class="rpnl-summary">
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Total Realized</div>
+        <div class="rpnl-val ${total >= 0 ? 'val-pos':'val-neg'}">${fPKR(total, true)}</div>
+      </div>
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Closed Positions</div>
+        <div class="rpnl-val">${rows.length}</div>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="text-align:left">Symbol</th>
+            <th>Realized P&amp;L</th>
+          </tr>
+        </thead>
+        <tbody>
+          ${rows.map(r => `<tr>
+            <td style="text-align:left"><span class="sym">${r.symbol}</span></td>
+            <td class="${r.realized >= 0 ? 'val-pos':'val-neg'}">${fPKR(r.realized, true)}</td>
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>`;
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER — TRANSACTION LOG
+══════════════════════════════════════════════════════ */
+function renderTransactionLog() {
+  const symFilter  = (document.getElementById('txFilterSym')?.value || '').toLowerCase();
+  const typeFilter = (document.getElementById('txFilterType')?.value || '').toLowerCase();
+  const search     = (document.getElementById('txSearch')?.value || '').toLowerCase();
+
+  // Rebuild symbol filter dropdown
+  const symSel = document.getElementById('txFilterSym');
+  if (symSel) {
+    const current = symSel.value;
+    const syms = [...new Set(state.transactions.map(t => t.symbol))].sort();
+    symSel.innerHTML = `<option value="">All Symbols</option>` +
+      syms.map(s => `<option value="${s.toLowerCase()}" ${current===s.toLowerCase()?'selected':''}>${s}</option>`).join('');
+  }
+
+  const filtered = state.transactions
+    .filter(t => !symFilter  || t.symbol.toLowerCase() === symFilter)
+    .filter(t => !typeFilter || t.type === typeFilter)
+    .filter(t => !search     || (t.notes||'').toLowerCase().includes(search))
+    .sort((a,b) => new Date(b.date) - new Date(a.date));
+
+  document.getElementById('txCount').textContent = state.transactions.length;
+
+  const tbody = document.getElementById('txTbody');
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="10"><div class="no-data">No transactions found</div></td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(tx => {
+    const total = tx.shares * tx.price;
+    return `<tr>
+      <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
+      <td style="text-align:left"><span class="tx-type ${tx.type}">${tx.type.toUpperCase()}</span></td>
+      <td style="text-align:left"><span class="sym">${tx.symbol}</span></td>
+      <td style="text-align:left"><span class="sector-tag">${tx.sector||'—'}</span></td>
+      <td>${fNum(tx.shares)}</td>
+      <td>${fPKR(tx.price)}</td>
+      <td>${fPKR(tx.commission)}</td>
+      <td class="${tx.type==='sell'?'val-pos':'val-neg'}">${tx.type==='sell'?'+':'-'}${fPKR(total)}</td>
+      <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${tx.notes||'—'}</td>
+      <td style="text-align:center">
+        <button class="btn btn-sm btn-danger" onclick="deleteTransaction('${tx.id}')">✕</button>
+      </td>
+    </tr>`;
+  }).join('');
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER ALL
+══════════════════════════════════════════════════════ */
+function renderAll() {
+  renderKPIs();
+  renderHoldingsTable();
+  renderCharts();
+  renderTopMovers();
+  renderRealizedPL();
+  renderAnalystSummary();
+  renderTransactionLog();
+  renderSettingsUI();
+}
+
+/* ══════════════════════════════════════════════════════
+   RENDER — ANALYST SUMMARY PANEL
+══════════════════════════════════════════════════════ */
+function renderAnalystSummary() {
+  const el = document.getElementById('analystSummary');
+  if (!el) return;
+
+  const { holdings } = getEnrichedHoldings();
+  const activeSymbols = holdings.map(h => h.symbol);
+
+  if (activeSymbols.length === 0) {
+    el.innerHTML = `<div style="color:var(--txt3);font-size:12px">No holdings yet</div>`;
+    return;
+  }
+
+  const confRank = { high:3, medium:2, low:1 };
+  const sigRank  = { BUY:0, HOLD:1, SELL:2 };
+  const sigColor = { BUY:'var(--green)', HOLD:'var(--amber)', SELL:'var(--red)' };
+  const sigIcon  = { BUY:'▲', HOLD:'◆', SELL:'▼' };
+  const confLabel = { high:'High conviction', medium:'Moderate', low:'Low conviction' };
+
+  const rows = activeSymbols
+    .map(sym => ({ sym, sig: ANALYST_SIGNALS[sym] }))
+    .filter(r => r.sig)
+    .sort((a, b) => {
+      const rs = sigRank[a.sig.signal] - sigRank[b.sig.signal];
+      if (rs !== 0) return rs;
+      return confRank[b.sig.conf] - confRank[a.sig.conf];
+    });
+
+  // Tally counts
+  const counts = { BUY: 0, HOLD: 0, SELL: 0 };
+  rows.forEach(r => counts[r.sig.signal]++);
+
+  el.innerHTML = `
+    <div style="display:flex;gap:8px;margin-bottom:12px">
+      ${['BUY','HOLD','SELL'].map(s =>
+        `<div style="flex:1;text-align:center;background:var(--elevated);border-radius:var(--r);padding:8px 4px">
+          <div class="signal-badge ${s.toLowerCase()}" style="justify-content:center;width:100%">${sigIcon[s]} ${s}</div>
+          <div style="font-family:var(--mono);font-size:18px;font-weight:700;margin-top:6px;color:${sigColor[s]}">${counts[s]}</div>
+        </div>`
+      ).join('')}
+    </div>
+    <div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto">
+      ${rows.map(r => `
+        <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid ${sigColor[r.sig.signal]}" title="${r.sig.rationale.replace(/'/g,"&#39;")}">
+          <div style="flex-shrink:0;min-width:44px">
+            <div style="font-weight:700;font-size:13px">${r.sym}</div>
+            <span class="signal-badge ${r.sig.signal.toLowerCase()}" style="margin-top:3px;font-size:9px;padding:1px 5px">${sigIcon[r.sig.signal]} ${r.sig.signal}</span>
+          </div>
+          <div style="flex:1;min-width:0">
+            <div style="font-size:10px;color:var(--txt2);line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">
+              ${r.sig.rationale.split('.')[0]}.
+            </div>
+            <div style="font-size:9px;color:var(--txt3);margin-top:3px">${confLabel[r.sig.conf]}</div>
+          </div>
+        </div>`
+      ).join('')}
+    </div>
+    <div style="font-size:10px;color:var(--txt3);margin-top:10px;line-height:1.4">
+      Hover over any signal in the table or panel for full rationale. Not financial advice.
+    </div>`;
+}
+
+/* ══════════════════════════════════════════════════════
+   TRANSACTION CRUD
+══════════════════════════════════════════════════════ */
+async function addTransaction(data) {
+  const payload = {
+    type: data.type,
+    symbol: data.symbol.trim().toUpperCase(),
+    sector: data.sector,
+    shares: parseFloat(data.shares),
+    price:  parseFloat(data.price),
+    commission: parseFloat(data.commission) || 0,
+    date: data.date,
+    notes: data.notes || ''
+  };
+
+  // Client-side pre-check for instant feedback — the server re-validates this
+  // authoritatively regardless (see /api/ledger POST handler).
+  if (payload.type === 'sell') {
+    const avail = getAvailableShares(payload.symbol);
+    if (payload.shares > avail + 1e-9) {
+      toast(`Cannot sell ${fNum(payload.shares)} shares — only ${fNum(avail)} available`, 'error');
+      return false;
+    }
+  }
+
+  try {
+    const res = await fetch('/api/ledger', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not add transaction', 'error');
+      return false;
+    }
+    const tx = await res.json();
+    tx.shares = parseFloat(tx.shares);
+    tx.price = parseFloat(tx.price);
+    tx.commission = parseFloat(tx.commission);
+    state.transactions.push(tx);
+    renderAll();
+    toast(`${tx.type.toUpperCase()} ${fNum(tx.shares)} × ${tx.symbol} added`, 'success');
+    return true;
+  } catch(e) {
+    toast('Network error — could not add transaction', 'error');
+    return false;
+  }
+}
+
+async function deleteTransaction(id) {
+  id = Number(id);
+  const tx = state.transactions.find(t => t.id === id);
+  if (!tx) return;
+
+  try {
+    const res = await fetch(`/api/ledger/${id}`, { method: 'DELETE', credentials: 'include' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Cannot delete — would cause negative shares on subsequent sells', 'error');
+      return;
+    }
+    state.transactions = state.transactions.filter(t => t.id !== id);
+    renderAll();
+    toast('Transaction removed', 'info');
+  } catch(e) {
+    toast('Network error — could not delete transaction', 'error');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   MODAL
+══════════════════════════════════════════════════════ */
+let currentTxType = 'buy';
+
+let openingMode = false;
+
+function openModal(symbol = '', sector = '') {
+  openingMode = false;
+  clearForm();
+  setOpeningModeUI(false);
+  if (symbol) {
+    document.getElementById('fSymbol').value = symbol;
+    document.getElementById('fSector').value = sector;
+  }
+  document.getElementById('modalBackdrop').classList.add('open');
+  document.getElementById('fSymbol').focus();
+  updateSellAvailable();
+}
+
+function openModalForSell(symbol, sector) {
+  openModal(symbol, sector);
+  setTxType('sell');
+}
+
+function addTxForSymbol(symbol, sector) {
+  openModal(symbol, sector);
+}
+
+// For a new user (or adding a position they already held before tracking it here):
+// records the qty + blended avg cost they're starting with as a single buy transaction.
+function openModalForOpeningPosition(symbol = '', sector = '') {
+  openModal(symbol, sector);
+  openingMode = true;
+  setTxType('buy');
+  document.getElementById('fNotes').value = 'Opening position';
+  setOpeningModeUI(true);
+}
+
+function setOpeningModeUI(isOpening) {
+  document.getElementById('modalTitle').textContent = isOpening ? 'Add Opening Position' : 'Add Transaction';
+  document.getElementById('submitTxBtn').textContent = isOpening ? 'Save Opening Position' : 'Add Transaction';
+  document.getElementById('lblShares').textContent = isOpening ? 'Opening Qty' : 'Shares';
+  document.getElementById('lblPrice').textContent = isOpening ? 'Avg Cost Price (PKR)' : 'Price Per Share (PKR)';
+  document.getElementById('txTypeGroup').style.display = isOpening ? 'none' : '';
+  document.getElementById('commissionGroup').style.display = isOpening ? 'none' : '';
+  document.getElementById('openingHint').style.display = isOpening ? '' : 'none';
+  if (isOpening) document.getElementById('fCommission').value = '0';
+}
+
+function closeModal() {
+  document.getElementById('modalBackdrop').classList.remove('open');
+}
+
+function handleBackdropClick(e) {
+  if (e.target === document.getElementById('modalBackdrop')) closeModal();
+}
+
+function setTxType(type) {
+  currentTxType = type;
+  document.getElementById('fTxType').value = type;
+  document.getElementById('typeBuyBtn').className = 'type-btn' + (type==='buy' ? ' active-buy' : '');
+  document.getElementById('typeSellBtn').className = 'type-btn' + (type==='sell' ? ' active-sell' : '');
+  updateSellAvailable();
+}
+
+function updateSellAvailable() {
+  const sym = (document.getElementById('fSymbol')?.value || '').toUpperCase();
+  const div = document.getElementById('sellValidation');
+  if (currentTxType === 'sell' && sym) {
+    const avail = getAvailableShares(sym);
+    document.getElementById('availableShares').textContent = `${fNum(avail)} shares`;
+    div.style.display = '';
+  } else {
+    div.style.display = 'none';
+  }
+}
+
+function clearForm() {
+  setTxType('buy');
+  ['fSymbol','fSector','fShares','fPrice','fNotes'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  document.getElementById('fCommission').value = '0';
+  document.getElementById('fDate').value = new Date().toISOString().split('T')[0];
+  ['errSymbol','errSector','errShares','errPrice','errDate'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '';
+  });
+}
+
+function clearErrors() {
+  ['errSymbol','errSector','errShares','errPrice','errDate'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '';
+  });
+}
+
+async function submitTransaction() {
+  clearErrors();
+  let valid = true;
+
+  const type    = document.getElementById('fTxType').value;
+  const symbol  = document.getElementById('fSymbol').value.trim().toUpperCase();
+  const sector  = document.getElementById('fSector').value;
+  const shares  = parseFloat(document.getElementById('fShares').value);
+  const price   = parseFloat(document.getElementById('fPrice').value);
+  const comm    = parseFloat(document.getElementById('fCommission').value) || 0;
+  const date    = document.getElementById('fDate').value;
+  const notes   = document.getElementById('fNotes').value;
+
+  if (!symbol || !/^[A-Z0-9\-]+$/.test(symbol)) {
+    document.getElementById('errSymbol').textContent = 'Valid ticker required (letters/numbers)';
+    valid = false;
+  }
+  if (!sector) {
+    document.getElementById('errSector').textContent = 'Select a sector';
+    valid = false;
+  }
+  if (!shares || shares <= 0) {
+    document.getElementById('errShares').textContent = 'Must be a positive number';
+    valid = false;
+  }
+  if (!price || price <= 0) {
+    document.getElementById('errPrice').textContent = 'Must be a positive number';
+    valid = false;
+  }
+  if (!date) {
+    document.getElementById('errDate').textContent = 'Date required';
+    valid = false;
+  }
+  if (!valid) return;
+
+  const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, date, notes });
+  if (ok) closeModal();
+}
+
+// Allow live sell validation on symbol input
+document.addEventListener('DOMContentLoaded', () => {
+  const fSym = document.getElementById('fSymbol');
+  if (fSym) fSym.addEventListener('input', handleSymbolInput);
+});
+
+/* ══════════════════════════════════════════════════════
+   SETTINGS
+══════════════════════════════════════════════════════ */
+function openSettings()  { document.getElementById('settingsPanel').classList.add('open'); }
+function closeSettings() { document.getElementById('settingsPanel').classList.remove('open'); }
+
+function cloneSettings() {
+  return { ...state.settings, manualPrices: { ...state.settings.manualPrices } };
+}
+
+// Mutates state.settings locally for instant feedback, then PUTs the full object in
+// the background; reverts + toasts if the save fails (e.g. session expired mid-use).
+async function pushSettings(previousSettings) {
+  try {
+    const res = await fetch('/api/settings', {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(state.settings)
+    });
+    if (!res.ok) throw new Error('save failed');
+  } catch(e) {
+    state.settings = previousSettings;
+    renderSettingsUI();
+    renderAll();
+    toast('Could not save settings — reverted', 'error');
+  }
+}
+
+function setCostMethod(method) {
+  const prev = cloneSettings();
+  state.settings.costMethod = method;
+  pushSettings(prev);
+  renderSettingsUI();
+  renderAll();
+  toast(`Cost method: ${method === 'fifo' ? 'FIFO' : 'Weighted Average'}`, 'info');
+}
+
+function toggleSetting(key) {
+  const prev = cloneSettings();
+  state.settings[key] = !state.settings[key];
+  pushSettings(prev);
+  renderSettingsUI();
+  renderAll();
+}
+
+function renderSettingsUI() {
+  const { costMethod, includeCommission } = state.settings;
+
+  // Cost method radios
+  const roWA   = document.getElementById('roWA');
+  const roFIFO = document.getElementById('roFIFO');
+  if (roWA && roFIFO) {
+    roWA.classList.toggle('active', costMethod === 'weightedAvg');
+    roFIFO.classList.toggle('active', costMethod === 'fifo');
+  }
+
+  // Toggles
+  const tComm = document.getElementById('toggleCommission');
+  if (tComm) tComm.classList.toggle('on', !!includeCommission);
+
+  // Manual prices
+  const symbols = [...new Set(state.transactions.map(t => t.symbol))].sort();
+  const listEl  = document.getElementById('manualPriceList');
+  if (!listEl) return;
+  listEl.innerHTML = symbols.length === 0
+    ? `<div style="color:var(--txt3);font-size:12px">Add transactions first</div>`
+    : symbols.map(sym => {
+        const current = state.prices[sym];
+        const manual  = state.settings.manualPrices[sym] || (current?.price || '');
+        return `<div class="manual-price-row">
+          <div class="manual-price-sym">${sym}</div>
+          <input type="number" class="form-input mono" style="font-size:12px;padding:5px 8px"
+            placeholder="Price PKR" value="${manual}"
+            onchange="setManualPrice('${sym}', this.value)">
+          ${current ? `<span class="price-status ${current.status}" style="flex-shrink:0">${current.status}</span>` : ''}
+        </div>`;
+      }).join('');
+}
+
+function setManualPrice(symbol, value) {
+  const prev = cloneSettings();
+  const price = parseFloat(value);
+  if (isNaN(price) || price <= 0) {
+    delete state.settings.manualPrices[symbol];
+  } else {
+    state.settings.manualPrices[symbol] = price;
+    state.prices[symbol] = {
+      price,
+      change: state.prices[symbol]?.change || 0,
+      changePct: state.prices[symbol]?.changePct || 0,
+      status: 'manual',
+      updatedAt: Date.now()
+    };
+    savePricesCache();
+  }
+  pushSettings(prev);
+  renderAll();
+  toast(`Manual price set: ${symbol} @ PKR ${fPKR(price)}`, 'info');
+}
+
+// Explicit opt-in demo button only — never auto-triggered (a freshly registered user
+// gets a genuinely empty ledger, not this placeholder portfolio).
+async function loadSampleData() {
+  if (state.transactions.length > 0) {
+    if (!confirm('This will REPLACE your current portfolio with sample data. Continue?')) return;
+    const res = await fetch('/api/ledger', { method: 'DELETE', credentials: 'include' });
+    if (!res.ok) { toast('Could not clear existing data', 'error'); return; }
+  }
+  const res = await fetch('/api/ledger/import', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ transactions: SAMPLE_TRANSACTIONS.map(t => ({...t})) })
+  });
+  if (!res.ok) { toast('Could not load sample data', 'error'); return; }
+
+  state.transactions = (await (await fetch('/api/ledger', { credentials: 'include' })).json())
+    .map(t => ({ ...t, shares: parseFloat(t.shares), price: parseFloat(t.price), commission: parseFloat(t.commission) }));
+  state.prices = {};
+  state.settings.manualPrices = {};
+  savePricesCache();
+  await pushSettings(cloneSettings());
+  document.getElementById('lastUpdated').textContent = 'No prices yet';
+  document.getElementById('statusDot').className = 'status-dot';
+  renderAll();
+  toast('CDC portfolio restored — add your buy prices & refresh', 'info');
+  closeSettings();
+}
+
+async function confirmClearAll() {
+  if (confirm('Clear ALL portfolio data? This cannot be undone.')) {
+    const res = await fetch('/api/ledger', { method: 'DELETE', credentials: 'include' });
+    if (!res.ok) { toast('Could not clear data', 'error'); return; }
+    state.transactions = [];
+    state.prices = {};
+    state.settings.manualPrices = {};
+    savePricesCache();
+    await pushSettings(cloneSettings());
+    renderAll();
+    toast('All data cleared', 'warning');
+    document.getElementById('statusDot').className = 'status-dot';
+    document.getElementById('lastUpdated').textContent = 'Not fetched';
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   CSV EXPORT
+══════════════════════════════════════════════════════ */
+function exportCSV() {
+  if (state.transactions.length === 0) {
+    toast('No transactions to export', 'warning');
+    return;
+  }
+  const headers = ['Date','Type','Symbol','Sector','Shares','Price','Commission','Total','Notes'];
+  const rows = state.transactions
+    .sort((a,b) => new Date(b.date)-new Date(a.date))
+    .map(tx => [
+      tx.date, tx.type.toUpperCase(), tx.symbol, tx.sector,
+      tx.shares, tx.price, tx.commission, (tx.shares * tx.price).toFixed(2), `"${(tx.notes||'').replace(/"/g,'""')}"`
+    ]);
+  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `psx-portfolio-${new Date().toISOString().split('T')[0]}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`Exported ${state.transactions.length} transactions`, 'success');
+}
+
+/* ══════════════════════════════════════════════════════
+   TOAST
+══════════════════════════════════════════════════════ */
+const TOAST_ICONS = { success:'✓', error:'✕', info:'ℹ', warning:'⚠' };
+
+function toast(msg, type = 'info', duration = 3500) {
+  const wrap = document.getElementById('toastWrap');
+  const el   = document.createElement('div');
+  el.className = `toast ${type}`;
+  el.innerHTML = `<span class="toast-icon">${TOAST_ICONS[type]||'ℹ'}</span>
+    <span class="toast-msg">${msg}</span>`;
+  wrap.appendChild(el);
+  setTimeout(() => {
+    el.style.animation = 'slideOut .2s ease forwards';
+    setTimeout(() => el.remove(), 200);
+  }, duration);
+}
+
+/* ══════════════════════════════════════════════════════
+   FORMATTERS
+══════════════════════════════════════════════════════ */
+function fPKR(v, showSign = false) {
+  const abs = Math.abs(v).toLocaleString('en-PK', {
+    minimumFractionDigits: 2, maximumFractionDigits: 2
+  });
+  if (showSign) return v >= 0 ? `+${abs}` : `−${abs}`;
+  return abs;
+}
+
+function fPct(v, showSign = false) {
+  const abs = Math.abs(v).toFixed(2) + '%';
+  if (showSign) return v >= 0 ? `+${abs}` : `−${abs}`;
+  return abs;
+}
+
+function fNum(v) {
+  return parseFloat(v.toFixed(4)).toLocaleString('en-PK', {
+    minimumFractionDigits: 0, maximumFractionDigits: 4
+  });
+}
+
+function setText(id, text) {
+  const el = document.getElementById(id);
+  if (el) el.textContent = text;
+}
+
+/* ══════════════════════════════════════════════════════
+   AUTH
+══════════════════════════════════════════════════════ */
+let currentUsername = null;
+
+async function checkAuth() {
+  try {
+    const res = await fetch('/api/auth/me', { credentials: 'include' });
+    if (!res.ok) { location.href = '/login.html'; return false; }
+    currentUsername = (await res.json()).username;
+    return true;
+  } catch(e) {
+    location.href = '/login.html';
+    return false;
+  }
+}
+
+function updateAuthUI() {
+  const el = document.getElementById('currentUsername');
+  if (el) el.textContent = currentUsername || '';
+}
+
+async function logout() {
+  try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); }
+  finally { location.href = '/login.html'; }
+}
+
+// One-time offer to import a browser's pre-migration localStorage ledger (from when
+// this app had no backend) into the now-authenticated account. Only shown when there's
+// local data AND the server-side ledger just loaded empty, so it never re-offers once
+// imported (or for any account that never had local data in this browser to begin with).
+function checkImportLocalData() {
+  const banner = document.getElementById('importLocalBanner');
+  if (!banner) return;
+  if (state.transactions.length > 0 || localStorage.getItem(STORAGE_KEY + '_imported')) {
+    banner.style.display = 'none';
+    return;
+  }
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch(e) { raw = null; }
+  if (!raw || !Array.isArray(raw.transactions) || raw.transactions.length === 0) {
+    banner.style.display = 'none';
+    return;
+  }
+  banner.style.display = 'flex';
+}
+
+async function importLocalData() {
+  let raw;
+  try { raw = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null'); } catch(e) { raw = null; }
+  if (!raw || !Array.isArray(raw.transactions) || raw.transactions.length === 0) {
+    toast('No local data found to import', 'warning');
+    return;
+  }
+  try {
+    const res = await fetch('/api/ledger/import', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ transactions: raw.transactions })
+    });
+    if (!res.ok) { toast('Import failed — try again', 'error'); return; }
+    const result = await res.json();
+    if (raw.settings) {
+      state.settings = Object.assign(state.settings, raw.settings);
+      await pushSettings(cloneSettings());
+    }
+    localStorage.setItem(STORAGE_KEY + '_imported', 'true');
+    await loadState();
+    renderAll();
+    document.getElementById('importLocalBanner').style.display = 'none';
+    toast(`Imported ${result.imported} transaction(s) from this browser's local data`, 'success');
+  } catch(e) {
+    toast('Network error during import', 'error');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   INIT
+══════════════════════════════════════════════════════ */
+async function init() {
+  if (!(await checkAuth())) return;
+  updateAuthUI();
+
+  if (!(await loadState())) return;
+
+  // Set today as default date in form
+  const fDate = document.getElementById('fDate');
+  if (fDate) fDate.value = new Date().toISOString().split('T')[0];
+
+  renderAll();
+  loadPsxSymbols();
+  checkImportLocalData();
+
+  // Keyboard shortcuts
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') {
+      closeModal();
+      closeSettings();
+    }
+    if ((e.ctrlKey || e.metaKey) && e.key === 'n') {
+      e.preventDefault();
+      openModal();
+    }
+  });
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

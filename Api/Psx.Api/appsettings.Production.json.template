@@ -1,0 +1,12 @@
+{
+  "Logging": {
+    "LogLevel": {
+      "Default": "Information",
+      "Microsoft.AspNetCore": "Warning"
+    }
+  },
+  "AllowedHosts": "*",
+  "ConnectionStrings": {
+    "Default": "Server=HOST,1433;Database=DBNAME;User Id=USER;Password=PASSWORD;TrustServerCertificate=True;Max Pool Size=20;Min Pool Size=0;Connect Timeout=15;"
+  }
+}

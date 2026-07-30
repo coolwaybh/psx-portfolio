@@ -1,0 +1,11 @@
+# Secrets - never commit
+deploy/*.secrets.json
+Api/Psx.Api/appsettings.Production.json
+
+# .NET build artifacts
+Api/Psx.Api/bin/
+Api/Psx.Api/obj/
+Api/Psx.Api/publish/
+
+# macOS
+.DS_Store
