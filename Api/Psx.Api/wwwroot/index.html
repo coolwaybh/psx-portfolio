@@ -1425,15 +1425,24 @@ async function fetchWithProxy(url, proxyIdx = 0) {
   return res;
 }
 
+// Returns { ok, results } - `ok` is true whenever a proxy successfully fetched and
+// parsed a real market-watch table, REGARDLESS of whether any of the requested symbols
+// had a matching row. market-watch only lists symbols that actually traded in the
+// current session (e.g. ~494 of PSX's ~757 listed equities on a quiet day) - a thinly
+// traded stock with zero matches is a completely different situation from the proxy/
+// network failing outright, and the caller needs to tell them apart to message honestly.
 async function fetchPSXMarketWatch(symbols) {
   const url = `https://dps.psx.com.pk/market-watch`;
   const wanted = new Set(symbols.map(s => s.toUpperCase()));
+  let anySucceeded = false;
   for (let i = 0; i < CORS_PROXIES.length; i++) {
     try {
       const res = await fetchWithProxy(url, i);
       const html = await res.text();
       const doc = new DOMParser().parseFromString(html, 'text/html');
       const rows = doc.querySelectorAll('table.tbl tbody tr');
+      if (rows.length === 0) continue;
+      anySucceeded = true;
       const results = {};
       for (const row of rows) {
         const cells = row.querySelectorAll('td');
@@ -1447,10 +1456,12 @@ async function fetchPSXMarketWatch(symbols) {
           results[sym] = { price, change: change || 0, changePct: changePct || 0, status: 'live', updatedAt: Date.now() };
         }
       }
-      if (Object.keys(results).length > 0) return results;
+      // A proxy that parsed fine but matched none of our symbols might just have
+      // stale/partial data - still worth trying the next proxy before giving up.
+      if (Object.keys(results).length > 0) return { ok: true, results };
     } catch(e) { continue; }
   }
-  return {};
+  return { ok: anySucceeded, results: {} };
 }
 
 /* ══════════════════════════════════════════════════════
@@ -2335,18 +2346,21 @@ async function refreshPrices() {
 
   let fetched = 0;
   let failed = 0;
+  let fetchSucceeded = false;
 
   // PSX market-watch covers every symbol in one request
   try {
-    const bulk = await fetchPSXMarketWatch(symbols);
+    const { ok, results: bulk } = await fetchPSXMarketWatch(symbols);
+    fetchSucceeded = ok;
     for (const [sym, d] of Object.entries(bulk)) {
       state.prices[sym] = d;
       fetched++;
     }
   } catch(e) {}
 
-  // Anything not returned (delisted/typo/proxy miss) falls back to manual override
+  // Anything not returned (delisted/typo/thin trading/proxy miss) falls back to manual override
   const missing = symbols.filter(s => !state.prices[s] || state.prices[s].status !== 'live');
+  const noDataAtAll = [];
   for (const sym of missing) {
     if (state.settings.manualPrices[sym] != null) {
       state.prices[sym] = {
@@ -2356,6 +2370,8 @@ async function refreshPrices() {
         status: 'manual',
         updatedAt: Date.now()
       };
+    } else {
+      noDataAtAll.push(sym);
     }
     failed++;
   }
@@ -2373,8 +2389,15 @@ async function refreshPrices() {
 
   if (fetched > 0) {
     toast(`Prices updated: ${fetched} live, ${failed} fallback`, 'success');
-  } else {
+  } else if (!fetchSucceeded) {
+    // The proxy/network request itself never came back with real data.
     toast(`Live fetch failed — using manual prices`, 'warning');
+  } else if (noDataAtAll.length > 0) {
+    // The fetch worked, but PSX's market-watch only lists symbols that traded in the
+    // current session - a thin/inactive stock legitimately won't be there yet.
+    toast(`No live price today for ${noDataAtAll.join(', ')} — add a manual price in Settings`, 'warning');
+  } else {
+    toast(`Using manual prices — live fetch found no updates`, 'info');
   }
 }
 
