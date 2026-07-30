@@ -222,6 +222,67 @@ settings.MapPut("/", async (SettingsDto dto, ClaimsPrincipal principal, PsxDbCon
     return Results.Ok(SettingsDto.From(s));
 });
 
+// ── CASH LEDGER ───────────────────────────────────────────────────────
+var cash = app.MapGroup("/api/cash").RequireAuthorization();
+
+cash.MapGet("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var entries = await db.CashEntries
+        .Where(c => c.UserId == userId)
+        .OrderByDescending(c => c.EntryDate)
+        .ToListAsync();
+    return Results.Ok(new
+    {
+        balance = CashCalculator.Balance(entries),
+        entries = entries.Select(CashDto.From)
+    });
+});
+
+cash.MapPost("/", async (CashCreateRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    if (!TryBuildCashEntry(req, userId, out var entry, out var error))
+        return Results.BadRequest(new { error });
+
+    if (entry.Type == CashType.Withdrawal)
+    {
+        var existing = await db.CashEntries.Where(c => c.UserId == userId).ToListAsync();
+        var balance = CashCalculator.Balance(existing);
+        if (entry.Amount > balance + 0.000000001m)
+            return Results.BadRequest(new { error = $"Cannot withdraw {entry.Amount} — only {balance} available." });
+    }
+
+    db.CashEntries.Add(entry);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/cash/{entry.Id}", CashDto.From(entry));
+});
+
+cash.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var entry = await db.CashEntries.FirstOrDefaultAsync(c => c.Id == id);
+    if (entry is null || entry.UserId != userId) return Results.NotFound();
+
+    if (entry.Type != CashType.Withdrawal)
+    {
+        var existing = await db.CashEntries.Where(c => c.UserId == userId).ToListAsync();
+        if (!CashCalculator.CanRemoveWithoutNegativeBalance(existing, entry.Id))
+            return Results.BadRequest(new { error = "Cannot delete — would cause negative cash balance on a later withdrawal." });
+    }
+
+    db.CashEntries.Remove(entry);
+    await db.SaveChangesAsync();
+    return Results.Ok();
+});
+
+cash.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var count = await db.CashEntries.Where(c => c.UserId == userId).ExecuteDeleteAsync();
+    return Results.Ok(new { deleted = count });
+});
+
 app.Run();
 
 static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry entry, out string error)
@@ -270,6 +331,38 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
     return true;
 }
 
+static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry entry, out string error)
+{
+    entry = null!;
+    error = "";
+
+    if (!Enum.TryParse<CashType>(req.Type, ignoreCase: true, out var type))
+    {
+        error = "Type must be 'deposit', 'withdrawal', or 'dividend'.";
+        return false;
+    }
+    if (req.Amount <= 0)
+    {
+        error = "Amount must be positive.";
+        return false;
+    }
+    if (!DateOnly.TryParse(req.Date, out var date))
+    {
+        error = "Date is invalid.";
+        return false;
+    }
+
+    entry = new CashEntry
+    {
+        UserId = userId,
+        Type = type,
+        Amount = req.Amount,
+        EntryDate = date,
+        Notes = req.Notes,
+    };
+    return true;
+}
+
 record AuthRequest(string? Username, string? Password);
 record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes);
 record ImportRequest(List<LedgerCreateRequest> Transactions);
@@ -286,6 +379,13 @@ record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shar
     public static LedgerDto From(LedgerEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Symbol, e.Sector, e.Shares, e.Price, e.Commission,
         e.TxDate.ToString("yyyy-MM-dd"), e.Notes
+    );
+}
+record CashCreateRequest(string Type, decimal Amount, string Date, string? Notes);
+record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes)
+{
+    public static CashDto From(CashEntry e) => new(
+        e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes
     );
 }
 

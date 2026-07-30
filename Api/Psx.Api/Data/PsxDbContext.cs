@@ -8,6 +8,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
     public DbSet<User> Users => Set<User>();
     public DbSet<LedgerEntry> LedgerEntries => Set<LedgerEntry>();
     public DbSet<UserSettings> UserSettings => Set<UserSettings>();
+    public DbSet<CashEntry> CashEntries => Set<CashEntry>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -35,6 +36,17 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.HasOne(s => s.User)
                 .WithOne(u => u.Settings)
                 .HasForeignKey<UserSettings>(s => s.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CashEntry>(b =>
+        {
+            b.Property(c => c.Type).HasConversion<string>().HasMaxLength(10);
+            b.Property(c => c.Amount).HasColumnType("decimal(18,4)");
+            b.HasIndex(c => c.UserId);
+            b.HasOne(c => c.User)
+                .WithMany()
+                .HasForeignKey(c => c.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
     }

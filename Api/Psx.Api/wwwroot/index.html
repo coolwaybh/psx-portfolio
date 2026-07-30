@@ -271,6 +271,8 @@ a{color:var(--accent);text-decoration:none}
 }
 .tx-type.buy{background:rgba(10,110,66,.10);color:var(--green)}
 .tx-type.sell{background:rgba(185,28,28,.10);color:var(--red)}
+.tx-type.deposit,.tx-type.dividend{background:rgba(10,110,66,.10);color:var(--green)}
+.tx-type.withdrawal{background:rgba(185,28,28,.10);color:var(--red)}
 
 /* ── MODAL ───────────────────────────────────────────────────── */
 .modal-backdrop{
@@ -501,6 +503,11 @@ a{color:var(--accent);text-decoration:none}
     <div class="kpi-val" id="kv-total">—</div>
     <div class="kpi-sub">PKR</div>
   </div>
+  <div class="kpi-card" id="kpiCash">
+    <div class="kpi-label">Free Cash</div>
+    <div class="kpi-val" id="kv-cash">—</div>
+    <div class="kpi-sub">PKR</div>
+  </div>
   <div class="kpi-card" id="kpiCost">
     <div class="kpi-label">Total Invested</div>
     <div class="kpi-val" id="kv-cost">—</div>
@@ -691,6 +698,72 @@ a{color:var(--accent);text-decoration:none}
     </table>
   </div>
 </section>
+
+<!-- ── CASH LEDGER ────────────────────────────────────────────── -->
+<section class="section" style="padding-top:20px;padding-bottom:40px">
+  <div class="section-hd">
+    <div class="section-title">
+      Free Cash Ledger <span class="badge" id="cashCount">0</span>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-sm btn-primary" onclick="openCashModal()">+ Add Cash Entry</button>
+    </div>
+  </div>
+  <div class="tbl-wrap">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th style="text-align:left">Date</th>
+          <th style="text-align:left">Type</th>
+          <th>Amount</th>
+          <th style="text-align:left">Notes</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody id="cashTbody"></tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ── ADD CASH ENTRY MODAL ───────────────────────────────────── -->
+<div class="modal-backdrop" id="cashModalBackdrop" onclick="if(event.target===this) closeCashModal()">
+  <div class="modal">
+    <div class="modal-hd">
+      <div class="modal-title">Add Cash Entry</div>
+      <button class="btn btn-icon btn-sm" onclick="closeCashModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div class="form-grid">
+        <div class="form-group full">
+          <label class="form-label">Type</label>
+          <select id="cfType" class="form-input">
+            <option value="deposit">Deposit</option>
+            <option value="withdrawal">Withdrawal</option>
+            <option value="dividend">Dividend</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Amount (PKR)</label>
+          <input type="number" id="cfAmount" class="form-input mono" placeholder="0.00" min="0.01" step="0.01">
+          <span class="form-error" id="errCfAmount"></span>
+        </div>
+        <div class="form-group">
+          <label class="form-label">Date</label>
+          <input type="date" id="cfDate" class="form-input">
+          <span class="form-error" id="errCfDate"></span>
+        </div>
+        <div class="form-group full">
+          <label class="form-label">Notes (optional)</label>
+          <input type="text" id="cfNotes" class="form-input" placeholder="e.g. Bank transfer, OGDC dividend...">
+        </div>
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" onclick="closeCashModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitCashEntry()">Add Entry</button>
+    </div>
+  </div>
+</div>
 
 <!-- ── ADD TRANSACTION MODAL ──────────────────────────────────── -->
 <div class="modal-backdrop" id="modalBackdrop" onclick="handleBackdropClick(event)">
@@ -970,7 +1043,8 @@ let state = {
     includeCommission: true,
     manualPrices: {}
   },
-  prices: {}
+  prices: {},
+  cash: { balance: 0, entries: [] }
 };
 
 let chartInstances = {};
@@ -989,11 +1063,12 @@ const PRICES_CACHE_KEY = 'psxPricesCache_v1';
 async function loadState() {
   loadPricesCache();
   try {
-    const [ledgerRes, settingsRes] = await Promise.all([
+    const [ledgerRes, settingsRes, cashRes] = await Promise.all([
       fetch('/api/ledger', { credentials: 'include' }),
-      fetch('/api/settings', { credentials: 'include' })
+      fetch('/api/settings', { credentials: 'include' }),
+      fetch('/api/cash', { credentials: 'include' })
     ]);
-    if (ledgerRes.status === 401 || settingsRes.status === 401) {
+    if (ledgerRes.status === 401 || settingsRes.status === 401 || cashRes.status === 401) {
       location.href = '/login.html';
       return false;
     }
@@ -1008,6 +1083,11 @@ async function loadState() {
       includeCommission: true,
       manualPrices: {}
     }, await settingsRes.json());
+    const cashData = await cashRes.json();
+    state.cash = {
+      balance: parseFloat(cashData.balance) || 0,
+      entries: cashData.entries.map(c => ({ ...c, amount: parseFloat(c.amount) }))
+    };
   } catch(e) {
     console.warn('State load error', e);
     toast('Could not load your portfolio from the server', 'error');
@@ -1478,6 +1558,7 @@ function renderKPIs() {
   const worst = withReturn.length ? withReturn.reduce((a,b) => a.returnPct < b.returnPct ? a : b) : null;
 
   setText('kv-total',  holdings.length ? fPKR(totalMktValue) : '—');
+  setText('kv-cash',   fPKR(state.cash.balance));
   setText('kv-cost',   holdings.length ? fPKR(totalCostBasis) : '—');
   setText('kv-upnl',   holdings.length ? fPKR(totalUnrealized, true) : '—');
   setText('kv-upnl-pct', holdings.length ? fPct(unrealizedPct, true) : '—');
@@ -2004,6 +2085,30 @@ function renderTransactionLog() {
 }
 
 /* ══════════════════════════════════════════════════════
+   RENDER — CASH LEDGER
+══════════════════════════════════════════════════════ */
+function renderCashLedger() {
+  document.getElementById('cashCount').textContent = state.cash.entries.length;
+
+  const tbody = document.getElementById('cashTbody');
+  if (state.cash.entries.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No cash entries yet — add a deposit to get started</div></td></tr>`;
+    return;
+  }
+
+  const sorted = [...state.cash.entries].sort((a,b) => new Date(b.date) - new Date(a.date));
+  tbody.innerHTML = sorted.map(c => `<tr>
+    <td style="text-align:left;font-family:var(--mono)">${c.date}</td>
+    <td style="text-align:left"><span class="tx-type ${c.type}">${c.type.toUpperCase()}</span></td>
+    <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${fPKR(c.amount)}</td>
+    <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.notes||'—'}</td>
+    <td style="text-align:center">
+      <button class="btn btn-sm btn-danger" onclick="deleteCashEntry('${c.id}')">✕</button>
+    </td>
+  </tr>`).join('');
+}
+
+/* ══════════════════════════════════════════════════════
    RENDER ALL
 ══════════════════════════════════════════════════════ */
 function renderAll() {
@@ -2014,6 +2119,7 @@ function renderAll() {
   renderRealizedPL();
   renderAnalystSummary();
   renderTransactionLog();
+  renderCashLedger();
   renderSettingsUI();
 }
 
@@ -2150,6 +2256,103 @@ async function deleteTransaction(id) {
   } catch(e) {
     toast('Network error — could not delete transaction', 'error');
   }
+}
+
+/* ══════════════════════════════════════════════════════
+   CASH LEDGER CRUD
+══════════════════════════════════════════════════════ */
+async function addCashEntry(data) {
+  const payload = {
+    type: data.type,
+    amount: parseFloat(data.amount),
+    date: data.date,
+    notes: data.notes || ''
+  };
+
+  try {
+    const res = await fetch('/api/cash', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not add cash entry', 'error');
+      return false;
+    }
+    await reloadCash();
+    renderAll();
+    toast(`${payload.type} of PKR ${fPKR(payload.amount)} added`, 'success');
+    return true;
+  } catch(e) {
+    toast('Network error — could not add cash entry', 'error');
+    return false;
+  }
+}
+
+async function deleteCashEntry(id) {
+  id = Number(id);
+  try {
+    const res = await fetch(`/api/cash/${id}`, { method: 'DELETE', credentials: 'include' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Cannot delete cash entry', 'error');
+      return;
+    }
+    await reloadCash();
+    renderAll();
+    toast('Cash entry removed', 'info');
+  } catch(e) {
+    toast('Network error — could not delete cash entry', 'error');
+  }
+}
+
+async function reloadCash() {
+  const res = await fetch('/api/cash', { credentials: 'include' });
+  const cashData = await res.json();
+  state.cash = {
+    balance: parseFloat(cashData.balance) || 0,
+    entries: cashData.entries.map(c => ({ ...c, amount: parseFloat(c.amount) }))
+  };
+}
+
+function openCashModal() {
+  document.getElementById('cfType').value = 'deposit';
+  document.getElementById('cfAmount').value = '';
+  document.getElementById('cfDate').value = new Date().toISOString().split('T')[0];
+  document.getElementById('cfNotes').value = '';
+  document.getElementById('errCfAmount').textContent = '';
+  document.getElementById('errCfDate').textContent = '';
+  document.getElementById('cashModalBackdrop').classList.add('open');
+}
+
+function closeCashModal() {
+  document.getElementById('cashModalBackdrop').classList.remove('open');
+}
+
+async function submitCashEntry() {
+  document.getElementById('errCfAmount').textContent = '';
+  document.getElementById('errCfDate').textContent = '';
+  let valid = true;
+
+  const type   = document.getElementById('cfType').value;
+  const amount = parseFloat(document.getElementById('cfAmount').value);
+  const date   = document.getElementById('cfDate').value;
+  const notes  = document.getElementById('cfNotes').value;
+
+  if (!amount || amount <= 0) {
+    document.getElementById('errCfAmount').textContent = 'Must be a positive number';
+    valid = false;
+  }
+  if (!date) {
+    document.getElementById('errCfDate').textContent = 'Date required';
+    valid = false;
+  }
+  if (!valid) return;
+
+  const ok = await addCashEntry({ type, amount, date, notes });
+  if (ok) closeCashModal();
 }
 
 /* ══════════════════════════════════════════════════════
@@ -2427,10 +2630,13 @@ async function loadSampleData() {
 }
 
 async function confirmClearAll() {
-  if (confirm('Clear ALL portfolio data? This cannot be undone.')) {
+  if (confirm('Clear ALL portfolio data (including the cash ledger)? This cannot be undone.')) {
     const res = await fetch('/api/ledger', { method: 'DELETE', credentials: 'include' });
     if (!res.ok) { toast('Could not clear data', 'error'); return; }
+    const cashRes = await fetch('/api/cash', { method: 'DELETE', credentials: 'include' });
+    if (!cashRes.ok) { toast('Could not clear cash ledger', 'error'); return; }
     state.transactions = [];
+    state.cash = { balance: 0, entries: [] };
     state.prices = {};
     state.settings.manualPrices = {};
     savePricesCache();
