@@ -22,4 +22,15 @@ public class CashEntry
     public DateOnly EntryDate { get; set; }
     public string? Notes { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
+
+    // Only set (and meaningful) when Type == Dividend — which script paid it.
+    public string? Symbol { get; set; }
+
+    // Set ONLY on a synthetic offsetting Withdrawal row created when a dividend was paid
+    // directly to the user's bank rather than credited to tracked free cash — points at
+    // the paired Dividend row's Id. One-directional: the Dividend row's own LinkedEntryId
+    // always stays null. To find a row's pair given either side's id, check this field
+    // first, then fall back to a reverse lookup (any row whose LinkedEntryId == this id).
+    public int? LinkedEntryId { get; set; }
+    public CashEntry? LinkedEntry { get; set; }
 }

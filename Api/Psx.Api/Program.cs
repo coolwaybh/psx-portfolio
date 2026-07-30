@@ -253,6 +253,34 @@ cash.MapPost("/", async (CashCreateRequest req, ClaimsPrincipal principal, PsxDb
             return Results.BadRequest(new { error = $"Cannot withdraw {entry.Amount} — only {balance} available." });
     }
 
+    // A dividend paid straight to the user's bank (common for PSX payouts) is recorded as
+    // TWO real rows rather than a boolean exclusion-flag: the Dividend itself (counts
+    // toward this script's total regardless of what happened to the cash) plus an
+    // offsetting Withdrawal so free cash is correctly left unchanged. Both in one
+    // transaction; dividend inserted first so the withdrawal's own overwithdraw check
+    // (trivially satisfied, since the amounts are equal) sees its contribution already applied.
+    if (entry.Type == CashType.Dividend && !req.CreditToCash)
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        db.CashEntries.Add(entry);
+        await db.SaveChangesAsync();
+
+        var offset = new CashEntry
+        {
+            UserId = userId,
+            Type = CashType.Withdrawal,
+            Amount = entry.Amount,
+            EntryDate = entry.EntryDate,
+            Notes = $"Dividend offset — {entry.Symbol}",
+            LinkedEntryId = entry.Id,
+        };
+        db.CashEntries.Add(offset);
+        await db.SaveChangesAsync();
+        await tx.CommitAsync();
+
+        return Results.Created($"/api/cash/{entry.Id}", CashDto.From(entry));
+    }
+
     db.CashEntries.Add(entry);
     await db.SaveChangesAsync();
     return Results.Created($"/api/cash/{entry.Id}", CashDto.From(entry));
@@ -264,15 +292,22 @@ cash.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbConte
     var entry = await db.CashEntries.FirstOrDefaultAsync(c => c.Id == id);
     if (entry is null || entry.UserId != userId) return Results.NotFound();
 
-    if (entry.Type != CashType.Withdrawal)
-    {
-        var existing = await db.CashEntries.Where(c => c.UserId == userId).ToListAsync();
-        if (!CashCalculator.CanRemoveWithoutNegativeBalance(existing, entry.Id))
-            return Results.BadRequest(new { error = "Cannot delete — would cause negative cash balance on a later withdrawal." });
-    }
+    // Resolve the linked pair, if any, in either direction.
+    var pair = entry.LinkedEntryId is int linkedId
+        ? await db.CashEntries.FirstOrDefaultAsync(c => c.Id == linkedId && c.UserId == userId)
+        : await db.CashEntries.FirstOrDefaultAsync(c => c.LinkedEntryId == entry.Id && c.UserId == userId);
 
+    var idsToRemove = pair is null ? new[] { entry.Id } : new[] { entry.Id, pair.Id };
+
+    var existing = await db.CashEntries.Where(c => c.UserId == userId).ToListAsync();
+    if (!CashCalculator.CanRemoveWithoutNegativeBalance(existing, idsToRemove))
+        return Results.BadRequest(new { error = "Cannot delete — would cause negative cash balance on a later withdrawal." });
+
+    await using var tx = await db.Database.BeginTransactionAsync();
     db.CashEntries.Remove(entry);
+    if (pair is not null) db.CashEntries.Remove(pair);
     await db.SaveChangesAsync();
+    await tx.CommitAsync();
     return Results.Ok();
 });
 
@@ -352,6 +387,17 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         return false;
     }
 
+    string? symbol = null;
+    if (type == CashType.Dividend)
+    {
+        if (string.IsNullOrWhiteSpace(req.Symbol))
+        {
+            error = "Symbol is required for a dividend.";
+            return false;
+        }
+        symbol = req.Symbol.Trim().ToUpperInvariant();
+    }
+
     entry = new CashEntry
     {
         UserId = userId,
@@ -359,6 +405,7 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         Amount = req.Amount,
         EntryDate = date,
         Notes = req.Notes,
+        Symbol = symbol,
     };
     return true;
 }
@@ -381,11 +428,12 @@ record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shar
         e.TxDate.ToString("yyyy-MM-dd"), e.Notes
     );
 }
-record CashCreateRequest(string Type, decimal Amount, string Date, string? Notes);
-record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes)
+record CashCreateRequest(string Type, decimal Amount, string Date, string? Notes, string? Symbol = null, bool CreditToCash = true);
+record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId)
 {
     public static CashDto From(CashEntry e) => new(
-        e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes
+        e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes,
+        e.Symbol, e.LinkedEntryId
     );
 }
 

@@ -43,11 +43,19 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
         {
             b.Property(c => c.Type).HasConversion<string>().HasMaxLength(10);
             b.Property(c => c.Amount).HasColumnType("decimal(18,4)");
+            b.Property(c => c.Symbol).HasMaxLength(20);
             b.HasIndex(c => c.UserId);
             b.HasOne(c => c.User)
                 .WithMany()
                 .HasForeignKey(c => c.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+            // Self-referencing pair link (dividend <-> its offsetting "direct to bank"
+            // withdrawal). Must be NoAction, not Cascade - SQL Server rejects cascading
+            // self-references outright at migration-apply time (error 1785).
+            b.HasOne(c => c.LinkedEntry)
+                .WithMany()
+                .HasForeignKey(c => c.LinkedEntryId)
+                .OnDelete(DeleteBehavior.NoAction);
         });
     }
 }

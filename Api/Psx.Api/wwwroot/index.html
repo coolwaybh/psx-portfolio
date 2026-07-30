@@ -577,6 +577,7 @@ a{color:var(--accent);text-decoration:none}
           <th>Cost Basis</th>
           <th>Mkt Value</th>
           <th>Unrealized P&amp;L</th>
+          <th>Dividends</th>
           <th>Return %</th>
           <th>Weight %</th>
           <th>Analyst Signal</th>
@@ -675,8 +676,10 @@ a{color:var(--accent);text-decoration:none}
       <option value="">All Types</option>
       <option value="buy">Buy</option>
       <option value="sell">Sell</option>
+      <option value="dividend">Dividend</option>
     </select>
     <input type="text" id="txSearch" class="form-input" placeholder="Search notes..." onkeyup="renderTransactionLog()" style="font-size:12px;padding:4px 8px;width:180px">
+    <span id="txDividendTotal" class="method-pill" style="display:none"></span>
   </div>
   <div class="tbl-wrap">
     <table class="tbl">
@@ -715,6 +718,7 @@ a{color:var(--accent);text-decoration:none}
         <tr>
           <th style="text-align:left">Date</th>
           <th style="text-align:left">Type</th>
+          <th style="text-align:left">Script</th>
           <th>Amount</th>
           <th style="text-align:left">Notes</th>
           <th>Action</th>
@@ -736,11 +740,16 @@ a{color:var(--accent);text-decoration:none}
       <div class="form-grid">
         <div class="form-group full">
           <label class="form-label">Type</label>
-          <select id="cfType" class="form-input">
+          <select id="cfType" class="form-input" onchange="updateCashModalMode()">
             <option value="deposit">Deposit</option>
             <option value="withdrawal">Withdrawal</option>
             <option value="dividend">Dividend</option>
           </select>
+        </div>
+        <div class="form-group" id="cfSymbolGroup" style="display:none">
+          <label class="form-label">Script (PSX Ticker)</label>
+          <input type="text" id="cfSymbol" class="form-input mono" list="symbolList" placeholder="e.g. OGDC" oninput="this.value=this.value.toUpperCase()">
+          <span class="form-error" id="errCfSymbol"></span>
         </div>
         <div class="form-group">
           <label class="form-label">Amount (PKR)</label>
@@ -751,6 +760,26 @@ a{color:var(--accent);text-decoration:none}
           <label class="form-label">Date</label>
           <input type="date" id="cfDate" class="form-input">
           <span class="form-error" id="errCfDate"></span>
+        </div>
+        <div class="form-group full" id="cfCreditGroup" style="display:none">
+          <label class="form-label">Where did this dividend go?</label>
+          <div class="radio-group">
+            <div class="radio-opt active" id="roCreditCash" onclick="setCreditToCash(true)">
+              <div class="radio-dot"></div>
+              <div>
+                <div class="radio-name">Keep in Free Cash</div>
+                <div class="radio-desc">Adds to your tracked free cash balance</div>
+              </div>
+            </div>
+            <div class="radio-opt" id="roDirectBank" onclick="setCreditToCash(false)">
+              <div class="radio-dot"></div>
+              <div>
+                <div class="radio-name">Received directly in bank</div>
+                <div class="radio-desc">Recorded for this script's dividend history only — free cash balance stays unchanged</div>
+              </div>
+            </div>
+          </div>
+          <input type="hidden" id="cfCreditToCash" value="true">
         </div>
         <div class="form-group full">
           <label class="form-label">Notes (optional)</label>
@@ -1630,7 +1659,7 @@ function renderHoldingsTable() {
   document.getElementById('holdingsCount').textContent = holdings.length;
 
   if (holdings.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12">
+    tbody.innerHTML = `<tr><td colspan="14">
       <div class="empty-state">
         <div class="es-icon">📊</div>
         <p>No holdings yet — add the opening quantity and average cost of what you already own to get started.</p>
@@ -1696,6 +1725,7 @@ function renderHoldingsTable() {
           <div class="mini-bar"><div class="mini-bar-fill" style="width:${plPct}%;background:${plColor}"></div></div>
         </div>
       </td>
+      <td class="${getSymbolDividendTotal(h.symbol) > 0 ? 'val-pos' : 'val-neu'}">${fPKR(getSymbolDividendTotal(h.symbol))}</td>
       <td class="${h.returnPct != null ? (h.returnPct >= 0 ? 'val-pos':'val-neg') : 'val-neu'}">
         ${h.returnPct != null ? fPct(h.returnPct, true) : '—'}
       </td>
@@ -2042,22 +2072,50 @@ function renderTransactionLog() {
   const typeFilter = (document.getElementById('txFilterType')?.value || '').toLowerCase();
   const search     = (document.getElementById('txSearch')?.value || '').toLowerCase();
 
-  // Rebuild symbol filter dropdown
+  const dividendEntries = state.cash.entries.filter(c => c.type === 'dividend');
+
+  // Rebuild symbol filter dropdown — includes symbols that only appear in dividend
+  // history (e.g. a script fully sold, or a dividend logged before any buy row existed).
   const symSel = document.getElementById('txFilterSym');
   if (symSel) {
     const current = symSel.value;
-    const syms = [...new Set(state.transactions.map(t => t.symbol))].sort();
+    const syms = [...new Set([
+      ...state.transactions.map(t => t.symbol),
+      ...dividendEntries.map(c => c.symbol)
+    ])].sort();
     symSel.innerHTML = `<option value="">All Symbols</option>` +
       syms.map(s => `<option value="${s.toLowerCase()}" ${current===s.toLowerCase()?'selected':''}>${s}</option>`).join('');
   }
 
-  const filtered = state.transactions
-    .filter(t => !symFilter  || t.symbol.toLowerCase() === symFilter)
+  // One unified, date-sorted display array — stock buy/sell rows and dividend rows,
+  // rather than bolting dividends on after the fact.
+  const unified = [
+    ...state.transactions.map(t => ({ kind: 'ledger', ...t })),
+    ...dividendEntries.map(c => ({
+      kind: 'dividend', id: c.id, type: 'dividend', symbol: c.symbol,
+      sector: '', date: c.date, notes: c.notes, amount: c.amount
+    }))
+  ];
+
+  const filtered = unified
+    .filter(t => !symFilter  || (t.symbol||'').toLowerCase() === symFilter)
     .filter(t => !typeFilter || t.type === typeFilter)
     .filter(t => !search     || (t.notes||'').toLowerCase().includes(search))
     .sort((a,b) => new Date(b.date) - new Date(a.date));
 
   document.getElementById('txCount').textContent = state.transactions.length;
+
+  // Total dividends indicator — only meaningful once a specific script is selected.
+  const divTotalEl = document.getElementById('txDividendTotal');
+  if (divTotalEl) {
+    if (symFilter) {
+      const total = getSymbolDividendTotal(symFilter.toUpperCase());
+      divTotalEl.textContent = `Dividends received: PKR ${fPKR(total)}`;
+      divTotalEl.style.display = '';
+    } else {
+      divTotalEl.style.display = 'none';
+    }
+  }
 
   const tbody = document.getElementById('txTbody');
   if (filtered.length === 0) {
@@ -2066,6 +2124,22 @@ function renderTransactionLog() {
   }
 
   tbody.innerHTML = filtered.map(tx => {
+    if (tx.kind === 'dividend') {
+      return `<tr>
+        <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
+        <td style="text-align:left"><span class="tx-type dividend">DIVIDEND</span></td>
+        <td style="text-align:left"><span class="sym">${tx.symbol}</span></td>
+        <td style="text-align:left"><span class="sector-tag">—</span></td>
+        <td>—</td>
+        <td>—</td>
+        <td>—</td>
+        <td class="val-pos">+${fPKR(tx.amount)}</td>
+        <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${tx.notes||'—'}</td>
+        <td style="text-align:center">
+          <button class="btn btn-sm btn-danger" onclick="deleteCashEntry('${tx.id}')">✕</button>
+        </td>
+      </tr>`;
+    }
     const total = tx.shares * tx.price;
     return `<tr>
       <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
@@ -2087,12 +2161,18 @@ function renderTransactionLog() {
 /* ══════════════════════════════════════════════════════
    RENDER — CASH LEDGER
 ══════════════════════════════════════════════════════ */
+function getSymbolDividendTotal(symbol) {
+  return state.cash.entries
+    .filter(c => c.type === 'dividend' && c.symbol === symbol)
+    .reduce((sum, c) => sum + c.amount, 0);
+}
+
 function renderCashLedger() {
   document.getElementById('cashCount').textContent = state.cash.entries.length;
 
   const tbody = document.getElementById('cashTbody');
   if (state.cash.entries.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No cash entries yet — add a deposit to get started</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="6"><div class="no-data">No cash entries yet — add a deposit to get started</div></td></tr>`;
     return;
   }
 
@@ -2100,6 +2180,7 @@ function renderCashLedger() {
   tbody.innerHTML = sorted.map(c => `<tr>
     <td style="text-align:left;font-family:var(--mono)">${c.date}</td>
     <td style="text-align:left"><span class="tx-type ${c.type}">${c.type.toUpperCase()}</span></td>
+    <td style="text-align:left"><span class="sym">${c.symbol||'—'}</span></td>
     <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${fPKR(c.amount)}</td>
     <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.notes||'—'}</td>
     <td style="text-align:center">
@@ -2266,7 +2347,9 @@ async function addCashEntry(data) {
     type: data.type,
     amount: parseFloat(data.amount),
     date: data.date,
-    notes: data.notes || ''
+    notes: data.notes || '',
+    symbol: data.symbol || null,
+    creditToCash: data.creditToCash !== undefined ? data.creditToCash : true
   };
 
   try {
@@ -2319,11 +2402,15 @@ async function reloadCash() {
 
 function openCashModal() {
   document.getElementById('cfType').value = 'deposit';
+  document.getElementById('cfSymbol').value = '';
   document.getElementById('cfAmount').value = '';
   document.getElementById('cfDate').value = new Date().toISOString().split('T')[0];
   document.getElementById('cfNotes').value = '';
   document.getElementById('errCfAmount').textContent = '';
   document.getElementById('errCfDate').textContent = '';
+  document.getElementById('errCfSymbol').textContent = '';
+  setCreditToCash(true);
+  updateCashModalMode();
   document.getElementById('cashModalBackdrop').classList.add('open');
 }
 
@@ -2331,16 +2418,35 @@ function closeCashModal() {
   document.getElementById('cashModalBackdrop').classList.remove('open');
 }
 
+function updateCashModalMode() {
+  const isDividend = document.getElementById('cfType').value === 'dividend';
+  document.getElementById('cfSymbolGroup').style.display = isDividend ? '' : 'none';
+  document.getElementById('cfCreditGroup').style.display = isDividend ? '' : 'none';
+}
+
+function setCreditToCash(credit) {
+  document.getElementById('cfCreditToCash').value = credit ? 'true' : 'false';
+  document.getElementById('roCreditCash').classList.toggle('active', credit);
+  document.getElementById('roDirectBank').classList.toggle('active', !credit);
+}
+
 async function submitCashEntry() {
   document.getElementById('errCfAmount').textContent = '';
   document.getElementById('errCfDate').textContent = '';
+  document.getElementById('errCfSymbol').textContent = '';
   let valid = true;
 
-  const type   = document.getElementById('cfType').value;
-  const amount = parseFloat(document.getElementById('cfAmount').value);
-  const date   = document.getElementById('cfDate').value;
-  const notes  = document.getElementById('cfNotes').value;
+  const type         = document.getElementById('cfType').value;
+  const symbol       = document.getElementById('cfSymbol').value.trim().toUpperCase();
+  const amount       = parseFloat(document.getElementById('cfAmount').value);
+  const date         = document.getElementById('cfDate').value;
+  const notes        = document.getElementById('cfNotes').value;
+  const creditToCash = document.getElementById('cfCreditToCash').value === 'true';
 
+  if (type === 'dividend' && !symbol) {
+    document.getElementById('errCfSymbol').textContent = 'Script is required for a dividend';
+    valid = false;
+  }
   if (!amount || amount <= 0) {
     document.getElementById('errCfAmount').textContent = 'Must be a positive number';
     valid = false;
@@ -2351,7 +2457,7 @@ async function submitCashEntry() {
   }
   if (!valid) return;
 
-  const ok = await addCashEntry({ type, amount, date, notes });
+  const ok = await addCashEntry({ type, symbol, amount, date, notes, creditToCash });
   if (ok) closeCashModal();
 }
 
