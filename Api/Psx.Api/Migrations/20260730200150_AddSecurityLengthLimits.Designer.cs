@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Psx.Api.Data;
 
@@ -11,9 +12,11 @@ using Psx.Api.Data;
 namespace Psx.Api.Migrations
 {
     [DbContext(typeof(PsxDbContext))]
-    partial class PsxDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260730200150_AddSecurityLengthLimits")]
+    partial class AddSecurityLengthLimits
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder

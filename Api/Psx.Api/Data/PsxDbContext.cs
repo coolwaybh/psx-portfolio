@@ -14,6 +14,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
     {
         modelBuilder.Entity<User>(b =>
         {
+            b.Property(u => u.Username).HasMaxLength(50);
             b.HasIndex(u => u.Username).IsUnique();
         });
 
@@ -23,6 +24,9 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.Property(t => t.Shares).HasColumnType("decimal(18,4)");
             b.Property(t => t.Price).HasColumnType("decimal(18,4)");
             b.Property(t => t.Commission).HasColumnType("decimal(18,4)");
+            b.Property(t => t.Notes).HasMaxLength(1000);
+            b.Property(t => t.Symbol).HasMaxLength(20);
+            b.Property(t => t.Sector).HasMaxLength(50);
             b.HasIndex(t => new { t.UserId, t.Symbol });
             b.HasOne(t => t.User)
                 .WithMany(u => u.LedgerEntries)
@@ -48,6 +52,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.Property(c => c.GrossAmount).HasColumnType("decimal(18,4)");
             b.Property(c => c.TaxRatePct).HasColumnType("decimal(5,2)");
             b.Property(c => c.Symbol).HasMaxLength(20);
+            b.Property(c => c.Notes).HasMaxLength(1000);
             b.HasIndex(c => c.UserId);
             b.HasOne(c => c.User)
                 .WithMany()

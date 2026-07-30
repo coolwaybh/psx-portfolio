@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -30,15 +31,50 @@ builder.Services.AddAuthorization();
 
 builder.Services.AddRateLimiter(options =>
 {
-    options.AddFixedWindowLimiter("auth", opt =>
-    {
-        opt.Window = TimeSpan.FromMinutes(1);
-        opt.PermitLimit = 10;
-        opt.QueueLimit = 0;
-    });
+    // Partitioned per client IP - AddFixedWindowLimiter (no partition key) would share
+    // ONE global counter across every visitor, letting any anonymous caller exhaust the
+    // whole site's login/register budget and lock everyone else out for the rest of the
+    // window. In-process ANCM hosting (see web.config hostingModel="inprocess") means
+    // IIS and Kestrel share one process, so RemoteIpAddress already reflects the real
+    // client - no ForwardedHeaders middleware needed here.
+    options.AddPolicy("auth", httpContext => RateLimitPartition.GetFixedWindowLimiter(
+        partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        factory: _ => new FixedWindowRateLimiterOptions
+        {
+            Window = TimeSpan.FromMinutes(1),
+            PermitLimit = 10,
+            QueueLimit = 0
+        }));
 });
 
 var app = builder.Build();
+
+// Baseline hardening headers. The CSP allows 'unsafe-inline' for script/style because
+// this app is a single-file page built entirely with inline onclick/oninput handlers and
+// style attributes - a strict CSP would break every interactive element without a much
+// larger refactor (converting all of them to addEventListener wiring). Still worth
+// setting: it blocks loading script/frame/object content from any origin except the
+// two CDNs this page actually uses, and frame-ancestors backs up X-Frame-Options against
+// clickjacking. Tighten further (nonces, drop unsafe-inline) if the app ever moves away
+// from inline handlers.
+app.Use(async (context, next) =>
+{
+    var headers = context.Response.Headers;
+    headers.Append("X-Content-Type-Options", "nosniff");
+    headers.Append("X-Frame-Options", "DENY");
+    headers.Append("Referrer-Policy", "strict-origin-when-cross-origin");
+    headers.Append("Content-Security-Policy",
+        "default-src 'self'; " +
+        "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; " +
+        "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
+        "font-src 'self' https://fonts.gstatic.com; " +
+        "img-src 'self' data:; " +
+        "connect-src 'self'; " +
+        "object-src 'none'; " +
+        "frame-ancestors 'self'; " +
+        "base-uri 'self'");
+    await next();
+});
 
 app.UseDefaultFiles();
 app.UseStaticFiles();
@@ -53,8 +89,10 @@ var auth = app.MapGroup("/api/auth").RequireRateLimiting("auth");
 auth.MapPost("/register", async (AuthRequest req, PsxDbContext db) =>
 {
     var username = req.Username?.Trim() ?? "";
-    if (username.Length < 3 || string.IsNullOrEmpty(req.Password) || req.Password.Length < 8)
-        return Results.BadRequest(new { error = "Username must be at least 3 characters and password at least 8." });
+    if (username.Length < 3 || username.Length > 50 || !IsValidUsername(username))
+        return Results.BadRequest(new { error = "Username must be 3-50 characters: letters, numbers, underscore, or dash only." });
+    if (string.IsNullOrEmpty(req.Password) || req.Password.Length < 8 || req.Password.Length > 128)
+        return Results.BadRequest(new { error = "Password must be 8-128 characters." });
 
     if (await db.Users.AnyAsync(u => u.Username == username))
         return Results.Conflict(new { error = "Username already taken." });
@@ -361,6 +399,9 @@ cash.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
 
 app.Run();
 
+static bool IsValidUsername(string s) => Regex.IsMatch(s, @"^[A-Za-z0-9_\-]+$");
+static bool IsValidSymbol(string s) => Regex.IsMatch(s, @"^[A-Z0-9\-]+$");
+
 static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry entry, out string error)
 {
     entry = null!;
@@ -371,9 +412,20 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
         error = "Type must be 'buy' or 'sell'.";
         return false;
     }
-    if (string.IsNullOrWhiteSpace(req.Symbol))
+    var symbol = (req.Symbol ?? "").Trim().ToUpperInvariant();
+    if (string.IsNullOrWhiteSpace(symbol) || symbol.Length > 20 || !IsValidSymbol(symbol))
     {
-        error = "Symbol is required.";
+        error = "Symbol must be 1-20 characters: letters, numbers, or dash only.";
+        return false;
+    }
+    if ((req.Sector?.Length ?? 0) > 50)
+    {
+        error = "Sector must be 50 characters or fewer.";
+        return false;
+    }
+    if ((req.Notes?.Length ?? 0) > 1000)
+    {
+        error = "Notes must be 1000 characters or fewer.";
         return false;
     }
     if (req.Shares <= 0)
@@ -396,7 +448,7 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
     {
         UserId = userId,
         Type = type,
-        Symbol = req.Symbol.Trim().ToUpperInvariant(),
+        Symbol = symbol,
         Sector = req.Sector ?? "",
         Shares = req.Shares,
         Price = req.Price,
@@ -422,6 +474,11 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         error = "Date is invalid.";
         return false;
     }
+    if ((req.Notes?.Length ?? 0) > 1000)
+    {
+        error = "Notes must be 1000 characters or fewer.";
+        return false;
+    }
 
     string? symbol = null;
     decimal amount;
@@ -430,12 +487,13 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 
     if (type == CashType.Dividend)
     {
-        if (string.IsNullOrWhiteSpace(req.Symbol))
+        var sym = (req.Symbol ?? "").Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(sym) || sym.Length > 20 || !IsValidSymbol(sym))
         {
-            error = "Symbol is required for a dividend.";
+            error = "Symbol must be 1-20 characters: letters, numbers, or dash only.";
             return false;
         }
-        symbol = req.Symbol.Trim().ToUpperInvariant();
+        symbol = sym;
 
         if (req.GrossAmount is not decimal gross || gross <= 0)
         {
