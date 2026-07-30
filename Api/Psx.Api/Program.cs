@@ -150,6 +150,7 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
                 Amount = cashAmount,
                 EntryDate = entry.TxDate,
                 Notes = $"{entry.Type} {entry.Shares} {entry.Symbol} @ {entry.Price}",
+                Symbol = entry.Symbol,
                 LedgerEntryId = entry.Id,
             };
             db.CashEntries.Add(cashEntry);

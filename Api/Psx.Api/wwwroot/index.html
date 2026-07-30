@@ -2864,12 +2864,17 @@ function renderRealizedPL() {
   }
 
   const rows = Object.values(bySymbol).sort((a,b) => b.realized - a.realized);
+  const totalDividends = rows.reduce((sum, r) => sum + getSymbolDividendTotal(r.symbol), 0);
 
   el.innerHTML = `
     <div class="rpnl-summary">
       <div class="rpnl-item">
         <div class="rpnl-lbl">Total Realized</div>
         <div class="rpnl-val ${total >= 0 ? 'val-pos':'val-neg'}">${fPKR(total, true)}</div>
+      </div>
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Dividends Earned</div>
+        <div class="rpnl-val ${totalDividends > 0 ? 'val-pos' : ''}">${fPKR(totalDividends)}</div>
       </div>
       <div class="rpnl-item">
         <div class="rpnl-lbl">Closed Positions</div>
@@ -2882,13 +2887,18 @@ function renderRealizedPL() {
           <tr>
             <th style="text-align:left">Symbol</th>
             <th>Realized P&amp;L</th>
+            <th>Dividends Earned</th>
           </tr>
         </thead>
         <tbody>
-          ${rows.map(r => `<tr>
+          ${rows.map(r => {
+            const div = getSymbolDividendTotal(r.symbol);
+            return `<tr>
             <td style="text-align:left"><span class="sym">${r.symbol}</span></td>
             <td class="${r.realized >= 0 ? 'val-pos':'val-neg'}">${fPKR(r.realized, true)}</td>
-          </tr>`).join('')}
+            <td class="${div > 0 ? 'val-pos' : 'val-neu'}">${div > 0 ? fPKR(div) : '—'}</td>
+          </tr>`;
+          }).join('')}
         </tbody>
       </table>
     </div>`;
@@ -3024,9 +3034,16 @@ function renderCashLedger() {
     const taxSubtext = (c.type === 'dividend' && c.grossAmount != null)
       ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Gross ${fPKR(c.grossAmount)} − Tax ${fPKR(c.grossAmount - c.amount)} (${fPct(c.taxRatePct||0)})</span>`
       : '';
+    // Auto-linked entries from a stock buy/sell get their own label (Purchase/Sale)
+    // instead of the generic Withdrawal/Deposit, so they read distinctly from a manual
+    // cash movement - color/sign is still driven by the underlying type either way.
+    const isTradeLinked = c.ledgerEntryId != null;
+    const typeLabel = isTradeLinked
+      ? (c.type === 'withdrawal' ? 'PURCHASE' : 'SALE')
+      : c.type.toUpperCase();
     return `<tr>
     <td style="text-align:left;font-family:var(--mono)">${c.date}</td>
-    <td style="text-align:left"><span class="tx-type ${c.type}">${c.type.toUpperCase()}</span></td>
+    <td style="text-align:left"><span class="tx-type ${c.type}">${typeLabel}</span></td>
     <td style="text-align:left"><span class="sym">${c.symbol||'—'}</span></td>
     <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${fPKR(c.amount)}${taxSubtext}</td>
     <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${c.notes||'—'}</td>
