@@ -9,6 +9,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
     public DbSet<LedgerEntry> LedgerEntries => Set<LedgerEntry>();
     public DbSet<UserSettings> UserSettings => Set<UserSettings>();
     public DbSet<CashEntry> CashEntries => Set<CashEntry>();
+    public DbSet<EodPrice> EodPrices => Set<EodPrice>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -20,13 +21,15 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
 
         modelBuilder.Entity<LedgerEntry>(b =>
         {
-            b.Property(t => t.Type).HasConversion<string>().HasMaxLength(4);
+            b.Property(t => t.Type).HasConversion<string>().HasMaxLength(10);
             b.Property(t => t.Shares).HasColumnType("decimal(18,4)");
             b.Property(t => t.Price).HasColumnType("decimal(18,4)");
             b.Property(t => t.Commission).HasColumnType("decimal(18,4)");
             b.Property(t => t.Notes).HasMaxLength(1000);
             b.Property(t => t.Symbol).HasMaxLength(20);
             b.Property(t => t.Sector).HasMaxLength(50);
+            b.Property(t => t.SplitRatioTo).HasColumnType("decimal(18,4)");
+            b.Property(t => t.SplitRatioFrom).HasColumnType("decimal(18,4)");
             b.HasIndex(t => new { t.UserId, t.Symbol });
             b.HasOne(t => t.User)
                 .WithMany(u => u.LedgerEntries)
@@ -75,6 +78,13 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
                 .WithMany()
                 .HasForeignKey(c => c.LedgerEntryId)
                 .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        modelBuilder.Entity<EodPrice>(b =>
+        {
+            b.Property(p => p.Symbol).HasMaxLength(20);
+            b.Property(p => p.Close).HasColumnType("decimal(18,4)");
+            b.HasIndex(p => new { p.Symbol, p.Date }).IsUnique();
         });
     }
 }

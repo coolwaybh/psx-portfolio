@@ -13,7 +13,16 @@ using Psx.Api.Services;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddDbContext<PsxDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("Default")));
+    options.UseSqlServer(builder.Configuration.GetConnectionString("Default"),
+        sql => sql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), errorNumbersToAdd: null)));
+
+builder.Services.AddSingleton<PsxSymbolDirectory>();
+
+builder.Services.AddHttpClient<PsxHistoricalPriceService>(client =>
+{
+    client.BaseAddress = new Uri("https://dps.psx.com.pk/");
+    client.Timeout = TimeSpan.FromSeconds(10);
+});
 
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -69,7 +78,7 @@ app.Use(async (context, next) =>
         "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; " +
         "font-src 'self' https://fonts.gstatic.com; " +
         "img-src 'self' data:; " +
-        "connect-src 'self'; " +
+        "connect-src 'self' https://proxy.cors.sh https://api.allorigins.win; " +
         "object-src 'none'; " +
         "frame-ancestors 'self'; " +
         "base-uri 'self'");
@@ -137,6 +146,23 @@ auth.MapGet("/me", (ClaimsPrincipal user) =>
     Results.Ok(new { id = user.GetUserId(), username = user.Identity!.Name })
 ).RequireAuthorization();
 
+auth.MapPost("/change-password", async (ChangePasswordRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+    if (user is null) return Results.Unauthorized();
+
+    if (!PasswordHasher.Verify(req.CurrentPassword ?? "", user.PasswordHash))
+        return Results.Json(new { error = "Current password is incorrect." }, statusCode: StatusCodes.Status400BadRequest);
+
+    if (string.IsNullOrEmpty(req.NewPassword) || req.NewPassword.Length < 8 || req.NewPassword.Length > 128)
+        return Results.BadRequest(new { error = "New password must be 8-128 characters." });
+
+    user.PasswordHash = PasswordHasher.Hash(req.NewPassword);
+    await db.SaveChangesAsync();
+    return Results.Ok();
+}).RequireAuthorization();
+
 // ── LEDGER ────────────────────────────────────────────────────────────
 var ledger = app.MapGroup("/api/ledger").RequireAuthorization();
 
@@ -164,38 +190,48 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
             return Results.BadRequest(new { error = $"Cannot sell {entry.Shares} shares — only {available} available." });
     }
 
-    await using var tx = await db.Database.BeginTransactionAsync();
-    db.LedgerEntries.Add(entry);
-    await db.SaveChangesAsync();
-
-    // A regular buy/sell auto-debits/credits free cash. Opening positions and bulk
-    // imports skip this (req.SkipCashEntry) - those represent shares already held or
-    // being backfilled, not a purchase made through the app right now. No check against
-    // available free cash here - a negative balance is allowed, just tracked.
-    if (!req.SkipCashEntry)
+    // EnableRetryOnFailure() switches the DbContext to a retrying execution strategy,
+    // which doesn't allow a bare db.Database.BeginTransactionAsync() - the strategy needs
+    // to own the whole retriable unit (transaction + operations) so a transient failure
+    // mid-transaction can be retried from the start instead of resuming a half-open one.
+    var strategy = db.Database.CreateExecutionStrategy();
+    await strategy.ExecuteAsync(async () =>
     {
-        var total = entry.Shares * entry.Price;
-        var cashAmount = entry.Type == TxType.Buy ? total + entry.Commission : total - entry.Commission;
-        // Amount must stay positive (CashCalculator assumes magnitude, sign comes from
-        // Type) - skip in the pathological case where a sell's commission alone would
-        // wipe out or exceed the proceeds, rather than fabricate a zero/negative row.
-        if (cashAmount > 0)
+        await using var tx = await db.Database.BeginTransactionAsync();
+        db.LedgerEntries.Add(entry);
+        await db.SaveChangesAsync();
+
+        // A regular buy/sell auto-debits/credits free cash. Opening positions and bulk
+        // imports skip this (req.SkipCashEntry) - those represent shares already held or
+        // being backfilled, not a purchase made through the app right now. A Split is
+        // structurally cash-neutral regardless of what the client sends - it never
+        // creates a cash entry, since no money changes hands on a stock split. No check
+        // against available free cash here - a negative balance is allowed, just tracked.
+        if (entry.Type != TxType.Split && !req.SkipCashEntry)
         {
-            var cashEntry = new CashEntry
+            var total = entry.Shares * entry.Price;
+            var cashAmount = entry.Type == TxType.Buy ? total + entry.Commission : total - entry.Commission;
+            // Amount must stay positive (CashCalculator assumes magnitude, sign comes from
+            // Type) - skip in the pathological case where a sell's commission alone would
+            // wipe out or exceed the proceeds, rather than fabricate a zero/negative row.
+            if (cashAmount > 0)
             {
-                UserId = userId,
-                Type = entry.Type == TxType.Buy ? CashType.Withdrawal : CashType.Deposit,
-                Amount = cashAmount,
-                EntryDate = entry.TxDate,
-                Notes = $"{entry.Type} {entry.Shares} {entry.Symbol} @ {entry.Price}",
-                Symbol = entry.Symbol,
-                LedgerEntryId = entry.Id,
-            };
-            db.CashEntries.Add(cashEntry);
-            await db.SaveChangesAsync();
+                var cashEntry = new CashEntry
+                {
+                    UserId = userId,
+                    Type = entry.Type == TxType.Buy ? CashType.Withdrawal : CashType.Deposit,
+                    Amount = cashAmount,
+                    EntryDate = entry.TxDate,
+                    Notes = $"{entry.Type} {entry.Shares} {entry.Symbol} @ {entry.Price}",
+                    Symbol = entry.Symbol,
+                    LedgerEntryId = entry.Id,
+                };
+                db.CashEntries.Add(cashEntry);
+                await db.SaveChangesAsync();
+            }
         }
-    }
-    await tx.CommitAsync();
+        await tx.CommitAsync();
+    });
 
     return Results.Created($"/api/ledger/{entry.Id}", LedgerDto.From(entry));
 });
@@ -207,22 +243,30 @@ ledger.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbCon
     // 404 (not 403) for entries owned by someone else, so we don't confirm another user's row exists.
     if (entry is null || entry.UserId != userId) return Results.NotFound();
 
-    if (entry.Type == TxType.Buy)
+    // Sell deletions (and reverse-split deletions, ratio<1) can only ever increase the
+    // running balance retroactively - provably safe. Buy deletions and forward-split
+    // deletions (ratio>1) can retroactively invalidate a later sell that depended on
+    // them, so both need the negative-balance replay check.
+    if (entry.Type != TxType.Sell)
     {
         var existing = await db.LedgerEntries.Where(t => t.UserId == userId).ToListAsync();
         if (!HoldingsCalculator.CanRemoveWithoutNegativeBalance(existing, entry.Symbol, entry.Id))
             return Results.BadRequest(new { error = "Cannot delete — would cause negative shares on a later sell." });
     }
 
-    await using var tx = await db.Database.BeginTransactionAsync();
-    // Remove the auto-linked cash entry too, if this transaction created one - not
-    // re-validated against the cash balance (same "allow negative" tradeoff as adding).
-    var linkedCash = await db.CashEntries.FirstOrDefaultAsync(c => c.LedgerEntryId == id && c.UserId == userId);
-    if (linkedCash is not null) db.CashEntries.Remove(linkedCash);
+    var strategy = db.Database.CreateExecutionStrategy();
+    await strategy.ExecuteAsync(async () =>
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        // Remove the auto-linked cash entry too, if this transaction created one - not
+        // re-validated against the cash balance (same "allow negative" tradeoff as adding).
+        var linkedCash = await db.CashEntries.FirstOrDefaultAsync(c => c.LedgerEntryId == id && c.UserId == userId);
+        if (linkedCash is not null) db.CashEntries.Remove(linkedCash);
 
-    db.LedgerEntries.Remove(entry);
-    await db.SaveChangesAsync();
-    await tx.CommitAsync();
+        db.LedgerEntries.Remove(entry);
+        await db.SaveChangesAsync();
+        await tx.CommitAsync();
+    });
     return Results.Ok();
 });
 
@@ -256,7 +300,13 @@ ledger.MapPost("/import", async (ImportRequest req, ClaimsPrincipal principal, P
         decimal running = 0;
         foreach (var e in group.OrderBy(e => e.TxDate))
         {
-            running += e.Type == TxType.Buy ? e.Shares : -e.Shares;
+            running = e.Type switch
+            {
+                TxType.Buy => running + e.Shares,
+                TxType.Sell => running - e.Shares,
+                TxType.Split => running * HoldingsCalculator.SplitRatio(e),
+                _ => running
+            };
             if (running < -0.000000001m)
             {
                 skipped.Add($"{e.Symbol}: batch would go negative — skipping remaining {group.Key} entries");
@@ -270,6 +320,39 @@ ledger.MapPost("/import", async (ImportRequest req, ClaimsPrincipal principal, P
     await db.SaveChangesAsync();
     return Results.Ok(new { imported = toAdd.Count, skipped });
 });
+
+// Parses an Arif Habib "Memo of Confirmation" trade-confirmation PDF into candidate
+// transactions for the user to review one-by-one - this endpoint never saves anything
+// itself. The frontend posts each confirmed candidate to POST /api/ledger (above) the
+// same way a manually-typed transaction is saved. The uploaded file is never persisted
+// to disk - read into memory, parsed, and discarded within this request.
+ledger.MapPost("/import/pdf", async (IFormFile file, PsxSymbolDirectory symbols) =>
+{
+    const long MaxFileSizeBytes = 5 * 1024 * 1024;
+    if (file.Length > MaxFileSizeBytes)
+        return Results.BadRequest(new { error = "File too large — please upload a PDF under 5MB." });
+
+    PdfParseResult result;
+    try
+    {
+        await using var stream = file.OpenReadStream();
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer);
+        buffer.Position = 0;
+        result = PdfConfirmationParser.Parse(buffer, symbols);
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+
+    return Results.Ok(new { candidates = result.Candidates, warnings = result.Warnings });
+})
+// Minimal APIs auto-require antiforgery validation for any IFormFile-binding endpoint,
+// even with no antiforgery middleware configured anywhere in this app (confirmed by
+// testing - the endpoint throws a 500 without this call). This app's auth is cookie +
+// SameSite=Lax, same as every other POST endpoint here.
+.DisableAntiforgery();
 
 // ── SETTINGS ──────────────────────────────────────────────────────────
 var settings = app.MapGroup("/api/settings").RequireAuthorization();
@@ -299,6 +382,28 @@ settings.MapPut("/", async (SettingsDto dto, ClaimsPrincipal principal, PsxDbCon
     s.OwnerName = string.IsNullOrWhiteSpace(dto.OwnerName) ? null : dto.OwnerName.Trim()[..Math.Min(dto.OwnerName.Trim().Length, 100)];
     await db.SaveChangesAsync();
     return Results.Ok(SettingsDto.From(s));
+});
+
+// ── HISTORICAL PRICES ─────────────────────────────────────────────────
+var prices = app.MapGroup("/api/prices").RequireAuthorization();
+
+prices.MapPost("/historical", async (HistoricalPriceRequest req, PsxHistoricalPriceService svc) =>
+{
+    if (!DateOnly.TryParse(req.Date, out var targetDate))
+        return Results.BadRequest(new { error = "Date is invalid." });
+    if (targetDate > DateOnly.FromDateTime(DateTime.UtcNow))
+        return Results.BadRequest(new { error = "Date cannot be in the future." });
+
+    var pricesOut = new Dictionary<string, decimal?>();
+    var asOfOut = new Dictionary<string, string>();
+    foreach (var sym in (req.Symbols ?? new List<string>()).Select(s => s.Trim().ToUpperInvariant()).Distinct())
+    {
+        var (close, actualDate) = await svc.GetPriceAsOf(sym, targetDate);
+        pricesOut[sym] = close;
+        if (close is not null && actualDate is not null)
+            asOfOut[sym] = actualDate.Value.ToString("yyyy-MM-dd");
+    }
+    return Results.Ok(new { prices = pricesOut, asOfDates = asOfOut });
 });
 
 // ── CASH LEDGER ───────────────────────────────────────────────────────
@@ -340,22 +445,26 @@ cash.MapPost("/", async (CashCreateRequest req, ClaimsPrincipal principal, PsxDb
     // (trivially satisfied, since the amounts are equal) sees its contribution already applied.
     if (entry.Type == CashType.Dividend && !req.CreditToCash)
     {
-        await using var tx = await db.Database.BeginTransactionAsync();
-        db.CashEntries.Add(entry);
-        await db.SaveChangesAsync();
-
-        var offset = new CashEntry
+        var strategy = db.Database.CreateExecutionStrategy();
+        await strategy.ExecuteAsync(async () =>
         {
-            UserId = userId,
-            Type = CashType.Withdrawal,
-            Amount = entry.Amount,
-            EntryDate = entry.EntryDate,
-            Notes = $"Dividend offset — {entry.Symbol}",
-            LinkedEntryId = entry.Id,
-        };
-        db.CashEntries.Add(offset);
-        await db.SaveChangesAsync();
-        await tx.CommitAsync();
+            await using var tx = await db.Database.BeginTransactionAsync();
+            db.CashEntries.Add(entry);
+            await db.SaveChangesAsync();
+
+            var offset = new CashEntry
+            {
+                UserId = userId,
+                Type = CashType.Withdrawal,
+                Amount = entry.Amount,
+                EntryDate = entry.EntryDate,
+                Notes = $"Dividend offset — {entry.Symbol}",
+                LinkedEntryId = entry.Id,
+            };
+            db.CashEntries.Add(offset);
+            await db.SaveChangesAsync();
+            await tx.CommitAsync();
+        });
 
         return Results.Created($"/api/cash/{entry.Id}", CashDto.From(entry));
     }
@@ -382,11 +491,15 @@ cash.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbConte
     if (!CashCalculator.CanRemoveWithoutNegativeBalance(existing, idsToRemove))
         return Results.BadRequest(new { error = "Cannot delete — would cause negative cash balance on a later withdrawal." });
 
-    await using var tx = await db.Database.BeginTransactionAsync();
-    db.CashEntries.Remove(entry);
-    if (pair is not null) db.CashEntries.Remove(pair);
-    await db.SaveChangesAsync();
-    await tx.CommitAsync();
+    var strategy = db.Database.CreateExecutionStrategy();
+    await strategy.ExecuteAsync(async () =>
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        db.CashEntries.Remove(entry);
+        if (pair is not null) db.CashEntries.Remove(pair);
+        await db.SaveChangesAsync();
+        await tx.CommitAsync();
+    });
     return Results.Ok();
 });
 
@@ -409,7 +522,7 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
 
     if (!Enum.TryParse<TxType>(req.Type, ignoreCase: true, out var type))
     {
-        error = "Type must be 'buy' or 'sell'.";
+        error = "Type must be 'buy', 'sell', or 'split'.";
         return false;
     }
     var symbol = (req.Symbol ?? "").Trim().ToUpperInvariant();
@@ -428,20 +541,48 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
         error = "Notes must be 1000 characters or fewer.";
         return false;
     }
-    if (req.Shares <= 0)
-    {
-        error = "Shares must be positive.";
-        return false;
-    }
-    if (req.Price <= 0)
-    {
-        error = "Price must be positive.";
-        return false;
-    }
     if (!DateOnly.TryParse(req.Date, out var date))
     {
         error = "Date is invalid.";
         return false;
+    }
+
+    // A Split is a marker, not a quantity/price event - Shares/Price/Commission are
+    // always forced to 0 regardless of what the client sends, and the ratio is
+    // validated in its own two fields instead.
+    decimal shares = 0, price = 0, commission = 0;
+    decimal? splitRatioTo = null, splitRatioFrom = null;
+
+    if (type == TxType.Split)
+    {
+        if (req.SplitRatioTo is not decimal to || to <= 0)
+        {
+            error = "Split ratio (new shares) must be positive.";
+            return false;
+        }
+        if (req.SplitRatioFrom is not decimal from || from <= 0)
+        {
+            error = "Split ratio (old shares) must be positive.";
+            return false;
+        }
+        splitRatioTo = to;
+        splitRatioFrom = from;
+    }
+    else
+    {
+        if (req.Shares <= 0)
+        {
+            error = "Shares must be positive.";
+            return false;
+        }
+        if (req.Price <= 0)
+        {
+            error = "Price must be positive.";
+            return false;
+        }
+        shares = req.Shares;
+        price = req.Price;
+        commission = req.Commission;
     }
 
     entry = new LedgerEntry
@@ -450,11 +591,13 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
         Type = type,
         Symbol = symbol,
         Sector = req.Sector ?? "",
-        Shares = req.Shares,
-        Price = req.Price,
-        Commission = req.Commission,
+        Shares = shares,
+        Price = price,
+        Commission = commission,
         TxDate = date,
         Notes = req.Notes,
+        SplitRatioTo = splitRatioTo,
+        SplitRatioFrom = splitRatioFrom,
     };
     return true;
 }
@@ -539,7 +682,8 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 }
 
 record AuthRequest(string? Username, string? Password);
-record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false);
+record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
+record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false, decimal? SplitRatioTo = null, decimal? SplitRatioFrom = null);
 record ImportRequest(List<LedgerCreateRequest> Transactions);
 record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct, string? OwnerName)
 {
@@ -551,14 +695,15 @@ record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string,
         s.OwnerName
     );
 }
-record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes)
+record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, decimal? SplitRatioTo, decimal? SplitRatioFrom)
 {
     public static LedgerDto From(LedgerEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Symbol, e.Sector, e.Shares, e.Price, e.Commission,
-        e.TxDate.ToString("yyyy-MM-dd"), e.Notes
+        e.TxDate.ToString("yyyy-MM-dd"), e.Notes, e.SplitRatioTo, e.SplitRatioFrom
     );
 }
 record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null);
+record HistoricalPriceRequest(string Date, List<string>? Symbols);
 record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId)
 {
     public static CashDto From(CashEntry e) => new(

@@ -88,6 +88,10 @@ h1{font-size:15px;font-weight:600;margin-bottom:4px}
       <label class="form-label">Password</label>
       <input type="password" id="fPassword" class="form-input" autocomplete="current-password" required>
     </div>
+    <div class="form-group" id="confirmPasswordGroup" style="display:none">
+      <label class="form-label">Confirm Password</label>
+      <input type="password" id="fConfirmPassword" class="form-input" autocomplete="new-password">
+    </div>
     <button type="submit" class="btn" id="submitBtn">Log In</button>
   </form>
 
@@ -108,6 +112,9 @@ function toggleMode() {
   document.getElementById('toggleText').textContent = isLogin ? "Don't have an account?" : 'Already have an account?';
   document.getElementById('toggleLink').textContent = isLogin ? 'Register' : 'Log in';
   document.getElementById('fPassword').autocomplete = isLogin ? 'current-password' : 'new-password';
+  document.getElementById('confirmPasswordGroup').style.display = isLogin ? 'none' : 'block';
+  document.getElementById('fConfirmPassword').required = !isLogin;
+  document.getElementById('fConfirmPassword').value = '';
   hideError();
 }
 
@@ -125,6 +132,13 @@ document.getElementById('authForm').addEventListener('submit', async (e) => {
   hideError();
   const username = document.getElementById('fUsername').value.trim();
   const password = document.getElementById('fPassword').value;
+  const confirmPassword = document.getElementById('fConfirmPassword').value;
+
+  if (mode === 'register' && password !== confirmPassword) {
+    showError('Passwords do not match.');
+    return;
+  }
+
   const btn = document.getElementById('submitBtn');
   btn.disabled = true;
 

@@ -9,8 +9,11 @@
 
   DATA MODEL:
     state.transactions  → Array<Transaction>
-      Transaction: { id, type('buy'|'sell'), symbol, sector,
-                     shares, price, commission, date, notes }
+      Transaction: { id, type('buy'|'sell'|'split'), symbol, sector,
+                     shares, price, commission, date, notes,
+                     splitRatioTo, splitRatioFrom }
+      For type==='split', shares/price/commission are always 0 - the ratio
+      lives in splitRatioTo/splitRatioFrom (e.g. a 2:1 split is To=2, From=1).
     state.settings      → { costMethod, includeCommission, manualPrices }
     state.prices        → { [symbol]: { price, change, changePct,
                                         status, updatedAt } }
@@ -38,6 +41,11 @@
     • New chart        → add <canvas> to HTML, instantiate in renderCharts()
     • New data source  → add provider in refreshPrices()
     • New KPI card     → add element in HTML, update in renderKPIs()
+    • New transaction kind → must branch explicitly in computeHoldingsWA/FIFO,
+      computeRealizedPL, and getAvailableShares (rescale/apply, don't fall
+      through to the buy/sell case), add a row-rendering branch in
+      renderTransactionLog, and a column in exportCSV if it carries data
+      those functions don't already show.
   ================================================================
 -->
 <!DOCTYPE html>
@@ -273,6 +281,7 @@ a{color:var(--accent);text-decoration:none}
 .tx-type.sell{background:rgba(185,28,28,.10);color:var(--red)}
 .tx-type.deposit,.tx-type.dividend{background:rgba(10,110,66,.10);color:var(--green)}
 .tx-type.withdrawal{background:rgba(185,28,28,.10);color:var(--red)}
+.tx-type.split{background:var(--accent-bg);color:var(--accent)}
 
 /* ── MODAL ───────────────────────────────────────────────────── */
 .modal-backdrop{
@@ -589,6 +598,40 @@ a{color:var(--accent);text-decoration:none}
   </div>
 </section>
 
+<!-- ── PORTFOLIO VALUE AS OF DATE ─────────────────────────────── -->
+<section class="section" style="padding-top:20px">
+  <div class="section-hd">
+    <div class="section-title">
+      Portfolio Value As Of Date
+    </div>
+    <div style="display:flex;gap:8px;align-items:center">
+      <input type="date" id="asOfDate" class="form-input" style="font-size:12px;padding:4px 8px">
+      <button class="btn btn-sm btn-primary" onclick="calculateAsOf()">Calculate</button>
+      <button class="btn btn-sm" onclick="exportAsOfCSV()">⬇ Export CSV</button>
+    </div>
+  </div>
+  <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
+    Computes your share count per symbol as of the selected date from your transaction history, and looks up each symbol's PSX closing price on (or just before) that date. Shares shown are editable — useful if your transaction history is incomplete for a position held before you started using this app. Edits here are not saved; they only affect this calculation.
+  </div>
+  <div class="tbl-wrap" id="asOfResultsWrap" style="display:none">
+    <table class="tbl">
+      <thead>
+        <tr>
+          <th>Symbol</th>
+          <th>Shares</th>
+          <th>Historical Price</th>
+          <th>Value</th>
+        </tr>
+      </thead>
+      <tbody id="asOfTbody"></tbody>
+    </table>
+    <div style="display:flex;justify-content:space-between;padding:12px;border-top:2px solid var(--border);font-weight:600">
+      <span>Total Portfolio Value</span>
+      <span id="asOfTotal" style="font-family:var(--mono)">—</span>
+    </div>
+  </div>
+</section>
+
 <!-- ── CHARTS ─────────────────────────────────────────────────── -->
 <section class="section" style="padding-top:20px">
   <div class="section-hd">
@@ -665,7 +708,81 @@ a{color:var(--accent);text-decoration:none}
       Transaction History <span class="badge" id="txCount">0</span>
     </div>
     <div style="display:flex;gap:8px">
+      <button class="btn btn-sm" onclick="openModalForSplit()">+ Record Split</button>
+      <button class="btn btn-sm" onclick="triggerPdfImport()">⬆ Import PDF</button>
       <button class="btn btn-sm" onclick="exportCSV()">⬇ Export CSV</button>
+    </div>
+  </div>
+  <input type="file" id="pdfImportInput" accept="application/pdf" style="display:none" onchange="handlePdfFileSelected(event)">
+  <div class="modal-backdrop" id="pdfImportBackdrop">
+    <div class="modal">
+      <div class="modal-hd">
+        <div>
+          <div class="modal-title" id="piTitle">Review Imported Transactions</div>
+          <div style="font-size:11px;color:var(--txt3);margin-top:2px" id="piProgress"></div>
+        </div>
+        <button class="btn btn-icon btn-sm" onclick="closePdfImport()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group full" id="piConfidenceHint" style="display:none">
+            <div style="background:var(--elevated);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--txt2)">
+              ⚠ Couldn't confidently match this company name to a ticker — please check or pick the symbol yourself.
+            </div>
+          </div>
+          <div class="form-group full" id="piContractRow" style="font-size:11px;color:var(--txt3)"></div>
+          <div class="form-group">
+            <label class="form-label">Symbol (PSX Ticker)</label>
+            <input type="text" id="piSymbol" class="form-input mono" list="symbolList" oninput="this.value=this.value.toUpperCase()">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Sector</label>
+            <select id="piSector" class="form-input">
+              <option value="">Select Sector</option>
+              <option>Banks</option>
+              <option>Fertilizer</option>
+              <option>Cement</option>
+              <option>Oil &amp; Gas</option>
+              <option>Technology</option>
+              <option>Textile</option>
+              <option>Power</option>
+              <option>Pharma</option>
+              <option>Auto</option>
+              <option>Insurance</option>
+              <option>Steel</option>
+              <option>Sugar</option>
+              <option>Chemical</option>
+              <option>Food</option>
+              <option>Other</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Shares</label>
+            <input type="number" id="piShares" class="form-input mono" step="0.01">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Price Per Share (PKR)</label>
+            <input type="number" id="piPrice" class="form-input mono" step="0.01">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Commission (PKR)</label>
+            <input type="number" id="piCommission" class="form-input mono" step="0.01">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Date</label>
+            <input type="date" id="piDate" class="form-input">
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Notes</label>
+            <input type="text" id="piNotes" class="form-input">
+          </div>
+        </div>
+      </div>
+      <div class="modal-ft">
+        <button class="btn" onclick="pdfImportPrevious()" id="piPrevBtn">Previous</button>
+        <button class="btn" onclick="pdfImportSkip()">Skip</button>
+        <button class="btn btn-primary" onclick="pdfImportConfirm()">Confirm</button>
+      </div>
     </div>
   </div>
   <div class="txlog-filters">
@@ -676,6 +793,7 @@ a{color:var(--accent);text-decoration:none}
       <option value="">All Types</option>
       <option value="buy">Buy</option>
       <option value="sell">Sell</option>
+      <option value="split">Split</option>
       <option value="dividend">Dividend</option>
     </select>
     <input type="text" id="txSearch" class="form-input" placeholder="Search notes..." onkeyup="renderTransactionLog()" style="font-size:12px;padding:4px 8px;width:180px">
@@ -838,6 +956,11 @@ a{color:var(--accent);text-decoration:none}
             Record the position you already hold as of today — quantity and your blended average cost per share. This is saved as a buy so it flows into your cost basis and P&amp;L like any other transaction.
           </div>
         </div>
+        <div class="form-group full" id="splitHint" style="display:none">
+          <div style="background:var(--elevated);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--txt2)">
+            Record a stock split as new shares : old shares — e.g. 2:1 for a regular split (2 new for every 1 old), or 1:5 for a reverse split / consolidation (1 new for every 5 old). Existing buy/sell rows for this script are left exactly as recorded; this just adds a marker so future calculations account for it.
+          </div>
+        </div>
         <div class="form-group">
           <label class="form-label">Symbol (PSX Ticker)</label>
           <input type="text" id="fSymbol" class="form-input mono" list="symbolList" placeholder="e.g. ENGRO" oninput="this.value=this.value.toUpperCase()">
@@ -915,6 +1038,16 @@ a{color:var(--accent);text-decoration:none}
       <div class="settings-label">Profile</div>
       <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">Shown on the dashboard header</div>
       <input type="text" id="settingsOwnerName" class="form-input" placeholder="e.g. Sarfraz Ahmed" onchange="setOwnerName(this.value)">
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Change Password</div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <input type="password" id="settingsCurrentPassword" class="form-input" placeholder="Current password" autocomplete="current-password">
+        <input type="password" id="settingsNewPassword" class="form-input" placeholder="New password (8-128 characters)" autocomplete="new-password">
+        <input type="password" id="settingsConfirmPassword" class="form-input" placeholder="Confirm new password" autocomplete="new-password">
+        <button class="btn" style="width:100%;justify-content:center" onclick="changePassword()">Update Password</button>
+      </div>
     </div>
 
     <div class="settings-section">
@@ -1148,7 +1281,9 @@ async function loadState() {
       ...t,
       shares: parseFloat(t.shares),
       price: parseFloat(t.price),
-      commission: parseFloat(t.commission)
+      commission: parseFloat(t.commission),
+      splitRatioTo: t.splitRatioTo != null ? parseFloat(t.splitRatioTo) : null,
+      splitRatioFrom: t.splitRatioFrom != null ? parseFloat(t.splitRatioFrom) : null
     }));
     state.settings = Object.assign({
       costMethod: 'weightedAvg',
@@ -1183,10 +1318,21 @@ function savePricesCache() {
 ══════════════════════════════════════════════════════ */
 function computeHoldingsWA() {
   const holdings = {};
-  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date) || a.id-b.id);
 
   for (const tx of sorted) {
     const sym = tx.symbol;
+
+    // A split rescales shares in place - totalCost (what was actually paid) never
+    // changes, so avgCost (recomputed below) drops proportionally on its own.
+    if (tx.type === 'split') {
+      if (holdings[sym]) {
+        const ratio = tx.splitRatioTo / tx.splitRatioFrom;
+        holdings[sym].shares *= ratio;
+      }
+      continue;
+    }
+
     const comm = state.settings.includeCommission ? tx.commission : 0;
 
     if (tx.type === 'buy') {
@@ -1222,10 +1368,20 @@ function computeHoldingsWA() {
 function computeHoldingsFIFO() {
   const lots = {};
   const holdings = {};
-  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date) || a.id-b.id);
 
   for (const tx of sorted) {
     const sym = tx.symbol;
+
+    // Rescale every existing lot - shares up, costPerShare down by the same ratio,
+    // so lot.shares*lot.costPerShare (what was actually paid) is unchanged.
+    if (tx.type === 'split') {
+      const ratio = tx.splitRatioTo / tx.splitRatioFrom;
+      if (lots[sym]) for (const lot of lots[sym]) { lot.shares *= ratio; lot.costPerShare /= ratio; }
+      if (holdings[sym]) holdings[sym].shares *= ratio;
+      continue;
+    }
+
     const comm = state.settings.includeCommission ? tx.commission : 0;
 
     if (tx.type === 'buy') {
@@ -1285,21 +1441,179 @@ function computeHoldings() {
    AVAILABLE SHARES FOR SELL VALIDATION
 ══════════════════════════════════════════════════════ */
 function getAvailableShares(symbol) {
-  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date) || a.id-b.id);
   let shares = 0;
   for (const tx of sorted) {
     if (tx.symbol !== symbol) continue;
     if (tx.type === 'buy') shares += tx.shares;
-    else shares -= tx.shares;
+    else if (tx.type === 'sell') shares -= tx.shares;
+    else if (tx.type === 'split') {
+      const ratio = tx.splitRatioTo / tx.splitRatioFrom;
+      if (isFinite(ratio) && ratio > 0) shares *= ratio;
+    }
   }
   return Math.max(0, shares);
+}
+
+// Share count per symbol as of a past date - a generalized, multi-symbol sibling of
+// getAvailableShares() above (same buy/sell/split-rescale logic, no cutoff), used by
+// the "Portfolio Value As Of Date" report. Deliberately NOT a variant of
+// computeHoldingsWA/FIFO - this only ever needs share counts, never cost basis, so
+// costMethod (WA vs FIFO) is irrelevant: both methods track identical share deltas,
+// they only differ in which cost is attributed to the shares that remain.
+function computeHoldingsAsOf(cutoffDate) {
+  const cutoff = new Date(cutoffDate);
+  const sorted = [...state.transactions]
+    .filter(tx => new Date(tx.date) <= cutoff)
+    .sort((a,b) => new Date(a.date)-new Date(b.date) || a.id-b.id);
+
+  const holdings = {};
+  for (const tx of sorted) {
+    const sym = tx.symbol;
+    if (tx.type === 'split') {
+      if (holdings[sym]) {
+        const ratio = tx.splitRatioTo / tx.splitRatioFrom;
+        if (isFinite(ratio) && ratio > 0) holdings[sym].shares *= ratio;
+      }
+      continue;
+    }
+    if (!holdings[sym]) holdings[sym] = { shares: 0, sector: tx.sector, symbol: sym };
+    if (tx.type === 'buy') holdings[sym].shares += tx.shares;
+    else if (tx.type === 'sell') holdings[sym].shares -= tx.shares;
+  }
+  for (const sym in holdings) {
+    if (holdings[sym].shares <= 1e-9) delete holdings[sym];
+  }
+  return holdings;
+}
+
+// Holds the current "as of" report's per-symbol data (shares/price) so edits to the
+// shares input can recompute value/total instantly with no network call. Deliberately
+// separate from state.settings.manualPrices - this is a transient, view-only override
+// for exploring a past date, never persisted, and must never leak into today's KPIs.
+let asOfRows = {};
+let asOfRequestedDate = null;
+
+async function calculateAsOf() {
+  const dateStr = document.getElementById('asOfDate').value;
+  if (!dateStr) {
+    toast('Pick a date first', 'error');
+    return;
+  }
+  if (new Date(dateStr) > new Date()) {
+    toast('Date cannot be in the future', 'error');
+    return;
+  }
+
+  const holdings = computeHoldingsAsOf(dateStr);
+  const symbols = Object.keys(holdings);
+  if (symbols.length === 0) {
+    toast('No positions held as of that date', 'warning');
+    document.getElementById('asOfResultsWrap').style.display = 'none';
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/prices/historical', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: dateStr, symbols })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(body.error || 'Could not fetch historical prices', 'error');
+      return;
+    }
+
+    asOfRows = {};
+    for (const sym of symbols) {
+      asOfRows[sym] = {
+        shares: holdings[sym].shares,
+        price: body.prices?.[sym] ?? null,
+        asOfDate: body.asOfDates?.[sym] || null
+      };
+    }
+    asOfRequestedDate = dateStr;
+    renderAsOfResults(dateStr);
+  } catch (e) {
+    toast('Network error — could not fetch historical prices', 'error');
+  }
+}
+
+function renderAsOfResults(requestedDate) {
+  const tbody = document.getElementById('asOfTbody');
+  tbody.innerHTML = Object.keys(asOfRows).sort().map(sym => {
+    const row = asOfRows[sym];
+    const priceCell = row.price == null
+      ? '<span class="val-neu">price unavailable</span>'
+      : `${fPKR(row.price)}${row.asOfDate && row.asOfDate !== requestedDate ? `<div style="font-size:10px;color:var(--txt3)">as of ${row.asOfDate}</div>` : ''}`;
+    return `<tr>
+      <td><span class="sym">${escapeHtml(sym)}</span></td>
+      <td><input type="number" class="form-input mono" style="width:100px;font-size:12px;padding:5px 8px" value="${row.shares}" step="0.01" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', this.value)"></td>
+      <td>${priceCell}</td>
+      <td class="mono" id="asOfValue_${escapeHtml(sym)}">${row.price != null ? fPKR(row.shares * row.price) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('asOfResultsWrap').style.display = '';
+  recalcAsOfTotal();
+}
+
+function recalcAsOfRow(symbol, sharesValue) {
+  const shares = parseFloat(sharesValue) || 0;
+  asOfRows[symbol].shares = shares;
+  const row = asOfRows[symbol];
+  const cell = document.getElementById(`asOfValue_${symbol}`);
+  if (cell) cell.textContent = row.price != null ? fPKR(shares * row.price) : '—';
+  recalcAsOfTotal();
+}
+
+function recalcAsOfTotal() {
+  const total = Object.values(asOfRows).reduce((sum, r) => sum + (r.price != null ? r.shares * r.price : 0), 0);
+  document.getElementById('asOfTotal').textContent = fPKR(total);
+}
+
+// Exports the currently-calculated "as of" report - handy for attaching to a yearly
+// income tax return, which is the main reason this whole report exists.
+function exportAsOfCSV() {
+  const symbols = Object.keys(asOfRows);
+  if (symbols.length === 0) {
+    toast('Calculate a valuation first', 'warning');
+    return;
+  }
+  const headers = ['Symbol', 'Shares', 'Price', 'Priced As Of', 'Value'];
+  let total = 0;
+  const rows = symbols.sort().map(sym => {
+    const row = asOfRows[sym];
+    const value = row.price != null ? row.shares * row.price : 0;
+    total += value;
+    return [
+      csvSafe(sym), row.shares,
+      row.price != null ? row.price : '', csvSafe(row.asOfDate || ''),
+      row.price != null ? value.toFixed(2) : ''
+    ];
+  });
+  const headerLines = [
+    [`Portfolio Value As Of: ${asOfRequestedDate}`], []
+  ];
+  const totalLine = [[], ['', '', '', 'Total', total.toFixed(2)]];
+  const csv = [...headerLines, headers, ...rows, ...totalLine].map(r => r.join(',')).join('\n');
+  const blob = new Blob([csv], { type: 'text/csv' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `psx-portfolio-value-${asOfRequestedDate}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast(`Exported valuation for ${symbols.length} symbols`, 'success');
 }
 
 /* ══════════════════════════════════════════════════════
    REALIZED P&L
 ══════════════════════════════════════════════════════ */
 function computeRealizedPL() {
-  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date) || a.id-b.id);
   const bySymbol = {};
   let total = 0;
 
@@ -1307,6 +1621,13 @@ function computeRealizedPL() {
     const lots = {};
     for (const tx of sorted) {
       const sym = tx.symbol;
+
+      if (tx.type === 'split') {
+        const ratio = tx.splitRatioTo / tx.splitRatioFrom;
+        if (lots[sym]) for (const lot of lots[sym]) { lot.shares *= ratio; lot.costPerShare /= ratio; }
+        continue;
+      }
+
       const comm = state.settings.includeCommission ? tx.commission : 0;
 
       if (tx.type === 'buy') {
@@ -1343,6 +1664,12 @@ function computeRealizedPL() {
     const runningAvg = {};
     for (const tx of sorted) {
       const sym = tx.symbol;
+
+      if (tx.type === 'split') {
+        if (runningAvg[sym]) runningAvg[sym].shares *= (tx.splitRatioTo / tx.splitRatioFrom);
+        continue;
+      }
+
       const comm = state.settings.includeCommission ? tx.commission : 0;
 
       if (tx.type === 'buy') {
@@ -2987,6 +3314,22 @@ function renderTransactionLog() {
         </td>
       </tr>`;
     }
+    if (tx.type === 'split') {
+      return `<tr>
+        <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
+        <td style="text-align:left"><span class="tx-type split">SPLIT</span></td>
+        <td style="text-align:left"><span class="sym">${escapeHtml(tx.symbol)}</span></td>
+        <td style="text-align:left"><span class="sector-tag">${escapeHtml(tx.sector)||'—'}</span></td>
+        <td>${fNum(tx.splitRatioTo)}:${fNum(tx.splitRatioFrom)}</td>
+        <td>—</td>
+        <td>—</td>
+        <td class="val-neu">—</td>
+        <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(tx.notes)||'—'}</td>
+        <td style="text-align:center">
+          <button class="btn btn-sm btn-danger" onclick="deleteTransaction('${tx.id}')">✕</button>
+        </td>
+      </tr>`;
+    }
     const total = tx.shares * tx.price;
     return `<tr>
       <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
@@ -3208,6 +3551,203 @@ async function addTransaction(data) {
   }
 }
 
+/* ══════════════════════════════════════════════════════
+   PDF TRADE-CONFIRMATION IMPORT
+   Uploads a broker "Memo of Confirmation" PDF, parses it server-side into candidate
+   transactions, then steps through them one at a time for the user to confirm/edit/skip
+   before each is saved via the same addTransaction() path a manual entry uses.
+══════════════════════════════════════════════════════ */
+let pdfImportCandidates = [];
+let pdfImportIndex = 0;
+let pdfImportConfirmedCount = 0;
+let pdfImportSkippedCount = 0;
+// Tracks which indices have already been acted on (confirmed or skipped), so closing
+// or navigating away doesn't silently drop a row nobody made a decision on.
+let pdfImportActedOn = new Set();
+
+function triggerPdfImport() {
+  document.getElementById('pdfImportInput').click();
+}
+
+async function handlePdfFileSelected(event) {
+  const file = event.target.files[0];
+  event.target.value = ''; // allow re-selecting the same file later
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  toast('Reading PDF…', 'info');
+  try {
+    const res = await fetch('/api/ledger/import/pdf', {
+      method: 'POST',
+      credentials: 'include',
+      body: formData
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(body.error || 'Could not read this PDF', 'error');
+      return;
+    }
+    for (const w of (body.warnings || [])) toast(w, 'warning');
+
+    if (!body.candidates || body.candidates.length === 0) {
+      if (!body.warnings || body.warnings.length === 0) {
+        toast('No transactions found in this PDF', 'warning');
+      }
+      return;
+    }
+
+    pdfImportCandidates = body.candidates;
+    pdfImportIndex = 0;
+    pdfImportConfirmedCount = 0;
+    pdfImportSkippedCount = 0;
+    pdfImportActedOn = new Set();
+    openPdfImportModal();
+  } catch (e) {
+    toast('Network error — could not upload PDF', 'error');
+  }
+}
+
+function openPdfImportModal() {
+  document.getElementById('pdfImportBackdrop').classList.add('open');
+  renderPdfImportStep();
+}
+
+function closePdfImport() {
+  document.getElementById('pdfImportBackdrop').classList.remove('open');
+}
+
+function renderPdfImportStep() {
+  const total = pdfImportCandidates.length;
+  const c = pdfImportCandidates[pdfImportIndex];
+
+  document.getElementById('piProgress').textContent =
+    `Transaction ${pdfImportIndex + 1} of ${total} · Confirmed: ${pdfImportConfirmedCount} · Skipped: ${pdfImportSkippedCount} · Remaining: ${total - pdfImportConfirmedCount - pdfImportSkippedCount}`;
+  document.getElementById('piTitle').textContent = `Review Imported Transaction — ${c.type.toUpperCase()}`;
+
+  document.getElementById('piConfidenceHint').style.display = c.matchConfidence === 'exact' ? 'none' : '';
+  document.getElementById('piContractRow').textContent = c.contractNumber
+    ? `From "${c.companyNameRaw}" — Contract# ${c.contractNumber}`
+    : `From "${c.companyNameRaw}"`;
+
+  document.getElementById('piSymbol').value = c.symbol || '';
+  document.getElementById('piSector').value = c.sector || '';
+  document.getElementById('piShares').value = c.shares;
+  document.getElementById('piPrice').value = c.price;
+  document.getElementById('piCommission').value = c.commission;
+  document.getElementById('piDate').value = c.date;
+  document.getElementById('piNotes').value = c.notes || '';
+
+  document.getElementById('piPrevBtn').disabled = pdfImportIndex === 0;
+
+  if (c.matchConfidence === 'none') document.getElementById('piSymbol').focus();
+}
+
+function pdfImportPrevious() {
+  if (pdfImportIndex === 0) return;
+  pdfImportIndex--;
+  renderPdfImportStep();
+}
+
+function pdfImportAdvanceOrFinish() {
+  const nextIndex = pdfImportCandidates.findIndex((_, i) => i > pdfImportIndex && !pdfImportActedOn.has(i));
+  if (nextIndex !== -1) {
+    pdfImportIndex = nextIndex;
+    renderPdfImportStep();
+    return;
+  }
+  // No un-acted rows remain ahead - if every row has been acted on, we're done.
+  if (pdfImportActedOn.size >= pdfImportCandidates.length) {
+    closePdfImport();
+    toast(`Imported ${pdfImportConfirmedCount} of ${pdfImportCandidates.length} transactions from PDF`, 'success');
+    return;
+  }
+  // Otherwise there's still an un-acted row earlier in the list - jump to it.
+  const earlier = pdfImportCandidates.findIndex((_, i) => !pdfImportActedOn.has(i));
+  pdfImportIndex = earlier;
+  renderPdfImportStep();
+}
+
+function pdfImportSkip() {
+  pdfImportActedOn.add(pdfImportIndex);
+  pdfImportSkippedCount++;
+  pdfImportAdvanceOrFinish();
+}
+
+async function pdfImportConfirm() {
+  const symbol = document.getElementById('piSymbol').value.trim().toUpperCase();
+  const sector = document.getElementById('piSector').value;
+  const shares = parseFloat(document.getElementById('piShares').value);
+  const price = parseFloat(document.getElementById('piPrice').value);
+  const commission = parseFloat(document.getElementById('piCommission').value) || 0;
+  const date = document.getElementById('piDate').value;
+  const notes = document.getElementById('piNotes').value;
+  const type = pdfImportCandidates[pdfImportIndex].type;
+
+  if (!symbol || !/^[A-Z0-9\-]+$/.test(symbol)) {
+    toast('Enter a valid symbol before confirming', 'error');
+    return;
+  }
+  if (!shares || shares <= 0 || !price || price <= 0 || !date) {
+    toast('Shares, price, and date must all be valid before confirming', 'error');
+    return;
+  }
+
+  const ok = await addTransaction({ type, symbol, sector, shares, price, commission, date, notes });
+  if (!ok) return; // addTransaction already toasted the error - stay on this row
+
+  pdfImportActedOn.add(pdfImportIndex);
+  pdfImportConfirmedCount++;
+  pdfImportAdvanceOrFinish();
+}
+
+// A split is cash-neutral (no money changes hands) and never touches Shares/Price -
+// the ratio is carried in its own two fields. Mirrors addTransaction()'s
+// fetch/mutate-state/renderAll shape but deliberately skips reloadCash().
+async function addSplit(data) {
+  const payload = {
+    type: 'split',
+    symbol: data.symbol.trim().toUpperCase(),
+    sector: data.sector,
+    shares: 0,
+    price: 0,
+    commission: 0,
+    date: data.date,
+    notes: data.notes || '',
+    skipCashEntry: true,
+    splitRatioTo: parseFloat(data.splitRatioTo),
+    splitRatioFrom: parseFloat(data.splitRatioFrom)
+  };
+
+  try {
+    const res = await fetch('/api/ledger', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not record split', 'error');
+      return false;
+    }
+    const tx = await res.json();
+    tx.shares = parseFloat(tx.shares);
+    tx.price = parseFloat(tx.price);
+    tx.commission = parseFloat(tx.commission);
+    tx.splitRatioTo = tx.splitRatioTo != null ? parseFloat(tx.splitRatioTo) : null;
+    tx.splitRatioFrom = tx.splitRatioFrom != null ? parseFloat(tx.splitRatioFrom) : null;
+    state.transactions.push(tx);
+    renderAll();
+    toast(`Split recorded: ${payload.splitRatioTo}:${payload.splitRatioFrom} for ${tx.symbol}`, 'success');
+    return true;
+  } catch(e) {
+    toast('Network error — could not record split', 'error');
+    return false;
+  }
+}
+
 async function deleteTransaction(id) {
   id = Number(id);
   const tx = state.transactions.find(t => t.id === id);
@@ -3216,7 +3756,10 @@ async function deleteTransaction(id) {
   const cashNote = state.cash.entries.some(c => c.ledgerEntryId === id)
     ? ' Its linked free-cash entry will be removed too.'
     : '';
-  if (!confirm(`Delete this ${tx.type.toUpperCase()} of ${fNum(tx.shares)} × ${tx.symbol} @ ${fPKR(tx.price)}? This cannot be undone.${cashNote}`)) {
+  const confirmMsg = tx.type === 'split'
+    ? `Delete this SPLIT (${fNum(tx.splitRatioTo)}:${fNum(tx.splitRatioFrom)}) for ${tx.symbol}? This cannot be undone.`
+    : `Delete this ${tx.type.toUpperCase()} of ${fNum(tx.shares)} × ${tx.symbol} @ ${fPKR(tx.price)}? This cannot be undone.${cashNote}`;
+  if (!confirm(confirmMsg)) {
     return;
   }
 
@@ -3415,11 +3958,14 @@ async function submitCashEntry() {
 let currentTxType = 'buy';
 
 let openingMode = false;
+let splitMode = false;
 
 function openModal(symbol = '', sector = '') {
   openingMode = false;
+  splitMode = false;
   clearForm();
   setOpeningModeUI(false);
+  setSplitModeUI(false);
   if (symbol) {
     document.getElementById('fSymbol').value = symbol;
     document.getElementById('fSector').value = sector;
@@ -3457,6 +4003,26 @@ function setOpeningModeUI(isOpening) {
   document.getElementById('commissionGroup').style.display = isOpening ? 'none' : '';
   document.getElementById('openingHint').style.display = isOpening ? '' : 'none';
   if (isOpening) document.getElementById('fCommission').value = '0';
+}
+
+// For recording a stock split (e.g. MTL 2:1): adds a marker transaction so future
+// holdings/cost-basis/realized-P&L calculations rescale correctly, without touching
+// any historically-recorded buy/sell rows.
+function openModalForSplit(symbol = '', sector = '') {
+  openModal(symbol, sector);
+  splitMode = true;
+  setSplitModeUI(true);
+}
+
+function setSplitModeUI(isSplit) {
+  document.getElementById('modalTitle').textContent = isSplit ? 'Record Stock Split' : (openingMode ? 'Add Opening Position' : 'Add Transaction');
+  document.getElementById('submitTxBtn').textContent = isSplit ? 'Save Split' : (openingMode ? 'Save Opening Position' : 'Add Transaction');
+  document.getElementById('lblShares').textContent = isSplit ? 'New Shares (per split)' : (openingMode ? 'Opening Qty' : 'Shares');
+  document.getElementById('lblPrice').textContent = isSplit ? 'Old Shares (per split)' : (openingMode ? 'Avg Cost Price (PKR)' : 'Price Per Share (PKR)');
+  document.getElementById('txTypeGroup').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
+  document.getElementById('commissionGroup').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
+  document.getElementById('splitHint').style.display = isSplit ? '' : 'none';
+  if (isSplit) document.getElementById('fCommission').value = '0';
 }
 
 function closeModal() {
@@ -3509,6 +4075,7 @@ function clearErrors() {
 }
 
 async function submitTransaction() {
+  if (splitMode) return submitSplit();
   clearErrors();
   let valid = true;
 
@@ -3544,6 +4111,48 @@ async function submitTransaction() {
   if (!valid) return;
 
   const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, date, notes, skipCashEntry: openingMode });
+  if (ok) closeModal();
+}
+
+// Reuses the shares/price fields as the split ratio's numerator/denominator (relabeled
+// by setSplitModeUI) rather than parsing a "2:1" string - avoids separator/whitespace
+// parsing edge cases entirely and gets the existing numeric-input validation for free.
+async function submitSplit() {
+  clearErrors();
+  let valid = true;
+
+  const symbol = document.getElementById('fSymbol').value.trim().toUpperCase();
+  const sector = document.getElementById('fSector').value;
+  const to     = parseFloat(document.getElementById('fShares').value);
+  const from   = parseFloat(document.getElementById('fPrice').value);
+  const date   = document.getElementById('fDate').value;
+  let notes    = document.getElementById('fNotes').value;
+
+  if (!symbol || !/^[A-Z0-9\-]+$/.test(symbol)) {
+    document.getElementById('errSymbol').textContent = 'Valid ticker required (letters/numbers)';
+    valid = false;
+  }
+  if (!sector) {
+    document.getElementById('errSector').textContent = 'Select a sector';
+    valid = false;
+  }
+  if (!to || to <= 0) {
+    document.getElementById('errShares').textContent = 'Must be a positive number';
+    valid = false;
+  }
+  if (!from || from <= 0) {
+    document.getElementById('errPrice').textContent = 'Must be a positive number';
+    valid = false;
+  }
+  if (!date) {
+    document.getElementById('errDate').textContent = 'Date required';
+    valid = false;
+  }
+  if (!valid) return;
+
+  if (!notes) notes = `Stock split ${to}:${from}`;
+
+  const ok = await addSplit({ symbol, sector, splitRatioTo: to, splitRatioFrom: from, date, notes });
   if (ok) closeModal();
 }
 
@@ -3623,6 +4232,48 @@ function setOwnerName(value) {
   pushSettings(prev);
   updateHeaderOwnerName();
   toast(state.settings.ownerName ? `Portfolio owner set to ${state.settings.ownerName}` : 'Portfolio owner cleared', 'info');
+}
+
+async function changePassword() {
+  const currentInput = document.getElementById('settingsCurrentPassword');
+  const newInput = document.getElementById('settingsNewPassword');
+  const confirmInput = document.getElementById('settingsConfirmPassword');
+  const currentPassword = currentInput.value;
+  const newPassword = newInput.value;
+  const confirmPassword = confirmInput.value;
+
+  if (!currentPassword) {
+    toast('Enter your current password', 'error');
+    return;
+  }
+  if (newPassword.length < 8 || newPassword.length > 128) {
+    toast('New password must be 8-128 characters', 'error');
+    return;
+  }
+  if (newPassword !== confirmPassword) {
+    toast('New passwords do not match', 'error');
+    return;
+  }
+
+  try {
+    const res = await fetch('/api/auth/change-password', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ currentPassword, newPassword })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not change password', 'error');
+      return;
+    }
+    currentInput.value = '';
+    newInput.value = '';
+    confirmInput.value = '';
+    toast('Password updated', 'success');
+  } catch (e) {
+    toast('Network error — please try again', 'error');
+  }
 }
 
 function updateHeaderOwnerName() {
@@ -3763,12 +4414,13 @@ function exportCSV() {
     toast('No transactions to export', 'warning');
     return;
   }
-  const headers = ['Date','Type','Symbol','Sector','Shares','Price','Commission','Total','Notes'];
+  const headers = ['Date','Type','Symbol','Sector','Shares','Price','Commission','Total','Notes','SplitRatio'];
   const rows = state.transactions
     .sort((a,b) => new Date(b.date)-new Date(a.date))
     .map(tx => [
       tx.date, tx.type.toUpperCase(), csvSafe(tx.symbol), csvSafe(tx.sector),
-      tx.shares, tx.price, tx.commission, (tx.shares * tx.price).toFixed(2), `"${csvSafe(tx.notes).replace(/"/g,'""')}"`
+      tx.shares, tx.price, tx.commission, (tx.shares * tx.price).toFixed(2), `"${csvSafe(tx.notes).replace(/"/g,'""')}"`,
+      tx.type === 'split' ? `${tx.splitRatioTo}:${tx.splitRatioFrom}` : ''
     ]);
   const ownerLine = state.settings.ownerName ? [[`Portfolio Owner: ${csvSafe(state.settings.ownerName)}`], []] : [];
   const csv = [...ownerLine, headers, ...rows].map(r => r.join(',')).join('\n');
