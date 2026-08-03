@@ -41,6 +41,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
         {
             b.HasKey(s => s.UserId);
             b.Property(s => s.DividendTaxRatePct).HasColumnType("decimal(5,2)");
+            b.Property(s => s.CgtRatePct).HasColumnType("decimal(5,2)");
             b.Property(s => s.OwnerName).HasMaxLength(100);
             b.HasOne(s => s.User)
                 .WithOne(u => u.Settings)
@@ -54,6 +55,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.Property(c => c.Amount).HasColumnType("decimal(18,4)");
             b.Property(c => c.GrossAmount).HasColumnType("decimal(18,4)");
             b.Property(c => c.TaxRatePct).HasColumnType("decimal(5,2)");
+            b.Property(c => c.CgtAmount).HasColumnType("decimal(18,4)");
             b.Property(c => c.Symbol).HasMaxLength(20);
             b.Property(c => c.Notes).HasMaxLength(1000);
             b.HasIndex(c => c.UserId);

@@ -24,6 +24,13 @@ builder.Services.AddHttpClient<PsxHistoricalPriceService>(client =>
     client.Timeout = TimeSpan.FromSeconds(10);
 });
 
+// Bare client factory for the market-watch proxy below - a third-party CORS proxy
+// relaying that ~470KB page to the browser was silently truncating it (confirmed by
+// direct testing: symbols present in the real page were missing from what the client
+// received), so this fetches it server-to-server instead, sidestepping both CORS and
+// any third-party proxy's size/reliability limits.
+builder.Services.AddHttpClient();
+
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
     {
@@ -190,6 +197,12 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
             return Results.BadRequest(new { error = $"Cannot sell {entry.Shares} shares — only {available} available." });
     }
 
+    // CGT only ever applies to a Sell - like Shares/Price/Commission on a Split, ignore
+    // whatever the client sent for any other type rather than trust it blindly.
+    var cgtAmount = entry.Type == TxType.Sell ? req.CgtAmount : 0;
+    if (cgtAmount < 0)
+        return Results.BadRequest(new { error = "CGT amount cannot be negative." });
+
     // EnableRetryOnFailure() switches the DbContext to a retrying execution strategy,
     // which doesn't allow a bare db.Database.BeginTransactionAsync() - the strategy needs
     // to own the whole retriable unit (transaction + operations) so a transient failure
@@ -210,10 +223,10 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
         if (entry.Type != TxType.Split && !req.SkipCashEntry)
         {
             var total = entry.Shares * entry.Price;
-            var cashAmount = entry.Type == TxType.Buy ? total + entry.Commission : total - entry.Commission;
+            var cashAmount = entry.Type == TxType.Buy ? total + entry.Commission : total - entry.Commission - cgtAmount;
             // Amount must stay positive (CashCalculator assumes magnitude, sign comes from
-            // Type) - skip in the pathological case where a sell's commission alone would
-            // wipe out or exceed the proceeds, rather than fabricate a zero/negative row.
+            // Type) - skip in the pathological case where a sell's commission (+ CGT) alone
+            // would wipe out or exceed the proceeds, rather than fabricate a zero/negative row.
             if (cashAmount > 0)
             {
                 var cashEntry = new CashEntry
@@ -225,6 +238,7 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
                     Notes = $"{entry.Type} {entry.Shares} {entry.Symbol} @ {entry.Price}",
                     Symbol = entry.Symbol,
                     LedgerEntryId = entry.Id,
+                    CgtAmount = cgtAmount > 0 ? cgtAmount : null,
                 };
                 db.CashEntries.Add(cashEntry);
                 await db.SaveChangesAsync();
@@ -273,7 +287,21 @@ ledger.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbCon
 ledger.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
 {
     var userId = principal.GetUserId();
-    var count = await db.LedgerEntries.Where(t => t.UserId == userId).ExecuteDeleteAsync();
+    var strategy = db.Database.CreateExecutionStrategy();
+    int count = 0;
+    await strategy.ExecuteAsync(async () =>
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        // Ledger entries can have a linked CashEntry (LedgerEntryId FK is NoAction, not
+        // Cascade - see PsxDbContext.cs) - remove those first, mirroring the single-entry
+        // delete endpoint above, or this bulk delete fails with a foreign-key violation
+        // for any user with real buy/sell history. Only removes cash rows actually linked
+        // to a ledger entry - manually-added cash entries (deposits, unlinked dividends)
+        // are left untouched, same as deleting one transaction at a time would leave them.
+        await db.CashEntries.Where(c => c.UserId == userId && c.LedgerEntryId != null).ExecuteDeleteAsync();
+        count = await db.LedgerEntries.Where(t => t.UserId == userId).ExecuteDeleteAsync();
+        await tx.CommitAsync();
+    });
     return Results.Ok(new { deleted = count });
 });
 
@@ -379,6 +407,8 @@ settings.MapPut("/", async (SettingsDto dto, ClaimsPrincipal principal, PsxDbCon
     s.ManualPricesJson = JsonSerializer.Serialize(dto.ManualPrices ?? new Dictionary<string, decimal>());
     if (dto.DividendTaxRatePct >= 0 && dto.DividendTaxRatePct <= 100)
         s.DividendTaxRatePct = dto.DividendTaxRatePct;
+    if (dto.CgtRatePct >= 0 && dto.CgtRatePct <= 100)
+        s.CgtRatePct = dto.CgtRatePct;
     s.OwnerName = string.IsNullOrWhiteSpace(dto.OwnerName) ? null : dto.OwnerName.Trim()[..Math.Min(dto.OwnerName.Trim().Length, 100)];
     await db.SaveChangesAsync();
     return Results.Ok(SettingsDto.From(s));
@@ -404,6 +434,43 @@ prices.MapPost("/historical", async (HistoricalPriceRequest req, PsxHistoricalPr
             asOfOut[sym] = actualDate.Value.ToString("yyyy-MM-dd");
     }
     return Results.Ok(new { prices = pricesOut, asOfDates = asOfOut });
+});
+
+// Server-side pass-through for PSX's live market-watch page - see the AddHttpClient()
+// comment above for why this exists instead of the client fetching it directly via a
+// third-party CORS proxy. Returns the raw HTML unchanged; the frontend's existing
+// DOMParser-based table parsing (fetchPSXMarketWatch) is untouched, only the URL it
+// fetches from changed.
+prices.MapGet("/market-watch", async (IHttpClientFactory httpFactory) =>
+{
+    var client = httpFactory.CreateClient();
+    client.Timeout = TimeSpan.FromSeconds(15);
+    try
+    {
+        var html = await client.GetStringAsync("https://dps.psx.com.pk/market-watch");
+        return Results.Content(html, "text/html");
+    }
+    catch (Exception)
+    {
+        return Results.StatusCode(StatusCodes.Status502BadGateway);
+    }
+});
+
+// Same server-to-server pass-through, for PSX's /indices page (KSE100 and friends) -
+// a separate page from market-watch, with its own server-rendered table.
+prices.MapGet("/indices", async (IHttpClientFactory httpFactory) =>
+{
+    var client = httpFactory.CreateClient();
+    client.Timeout = TimeSpan.FromSeconds(15);
+    try
+    {
+        var html = await client.GetStringAsync("https://dps.psx.com.pk/indices");
+        return Results.Content(html, "text/html");
+    }
+    catch (Exception)
+    {
+        return Results.StatusCode(StatusCodes.Status502BadGateway);
+    }
 });
 
 // ── CASH LEDGER ───────────────────────────────────────────────────────
@@ -506,7 +573,20 @@ cash.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbConte
 cash.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
 {
     var userId = principal.GetUserId();
-    var count = await db.CashEntries.Where(c => c.UserId == userId).ExecuteDeleteAsync();
+    var strategy = db.Database.CreateExecutionStrategy();
+    int count = 0;
+    await strategy.ExecuteAsync(async () =>
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        // Break self-referencing dividend<->withdrawal links first (LinkedEntryId FK is
+        // NoAction) before the bulk delete - avoids depending on exactly how SQL Server
+        // orders constraint checks within a single multi-row DELETE against a
+        // self-referencing table, same defensive reasoning as the ledger bulk delete.
+        await db.CashEntries.Where(c => c.UserId == userId && c.LinkedEntryId != null)
+            .ExecuteUpdateAsync(s => s.SetProperty(c => c.LinkedEntryId, (int?)null));
+        count = await db.CashEntries.Where(c => c.UserId == userId).ExecuteDeleteAsync();
+        await tx.CommitAsync();
+    });
     return Results.Ok(new { deleted = count });
 });
 
@@ -683,16 +763,17 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 
 record AuthRequest(string? Username, string? Password);
 record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
-record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false, decimal? SplitRatioTo = null, decimal? SplitRatioFrom = null);
+record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false, decimal? SplitRatioTo = null, decimal? SplitRatioFrom = null, decimal CgtAmount = 0);
 record ImportRequest(List<LedgerCreateRequest> Transactions);
-record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct, string? OwnerName)
+record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct, string? OwnerName, decimal CgtRatePct = 15m)
 {
     public static SettingsDto From(UserSettings s) => new(
         s.CostMethod,
         s.IncludeCommission,
         JsonSerializer.Deserialize<Dictionary<string, decimal>>(s.ManualPricesJson) ?? new(),
         s.DividendTaxRatePct,
-        s.OwnerName
+        s.OwnerName,
+        s.CgtRatePct
     );
 }
 record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, decimal? SplitRatioTo, decimal? SplitRatioFrom)
@@ -704,11 +785,11 @@ record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shar
 }
 record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null);
 record HistoricalPriceRequest(string Date, List<string>? Symbols);
-record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId)
+record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId, decimal? CgtAmount)
 {
     public static CashDto From(CashEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes,
-        e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct, e.LedgerEntryId
+        e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct, e.LedgerEntryId, e.CgtAmount
     );
 }
 

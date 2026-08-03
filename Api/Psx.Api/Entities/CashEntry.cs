@@ -34,6 +34,15 @@ public class CashEntry
     public decimal? GrossAmount { get; set; }
     public decimal? TaxRatePct { get; set; }
 
+    // Set ONLY when this entry is the auto-linked Deposit from a Sell (LedgerEntryId
+    // below) that realized a gain — Pakistan's NCCPL withholds Capital Gains Tax at
+    // settlement, on the gain, not the proceeds. Already netted out of Amount (same
+    // convention as Commission); kept as its own field, not folded into
+    // Commission/GrossAmount/TaxRatePct above, because those are Dividend-specific by
+    // contract elsewhere in this codebase and CGT is computed from realized gain
+    // (shares × (price − cost basis)), a different quantity than a dividend's gross.
+    public decimal? CgtAmount { get; set; }
+
     // Set ONLY on a synthetic offsetting Withdrawal row created when a dividend was paid
     // directly to the user's bank rather than credited to tracked free cash — points at
     // the paired Dividend row's Id. One-directional: the Dividend row's own LinkedEntryId

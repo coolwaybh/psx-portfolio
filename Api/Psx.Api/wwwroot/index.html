@@ -507,6 +507,11 @@ a{color:var(--accent);text-decoration:none}
 
 <!-- ── KPI CARDS ──────────────────────────────────────────────── -->
 <div class="kpi-grid" id="kpiGrid">
+  <div class="kpi-card" id="kpiIndex">
+    <div class="kpi-label">KSE-100 Index</div>
+    <div class="kpi-val" id="kv-index">—</div>
+    <div class="kpi-sub" id="kv-index-chg">—</div>
+  </div>
   <div class="kpi-card" id="kpiPortValue">
     <div class="kpi-label">Portfolio Value</div>
     <div class="kpi-val" id="kv-total">—</div>
@@ -661,6 +666,10 @@ a{color:var(--accent);text-decoration:none}
     <div class="chart-card">
       <div class="chart-title">Return % vs Portfolio Weight (Bubble)</div>
       <div class="chart-body"><canvas id="bubbleChart"></canvas></div>
+    </div>
+    <div class="chart-card" style="grid-column:1/-1">
+      <div class="chart-title">Monthly Cash Flow — Injected / Bought / Sold</div>
+      <div class="chart-body"><canvas id="cashFlowChart"></canvas></div>
     </div>
   </div>
 </section>
@@ -991,17 +1000,22 @@ a{color:var(--accent);text-decoration:none}
         </div>
         <div class="form-group">
           <label class="form-label" id="lblShares">Shares</label>
-          <input type="number" id="fShares" class="form-input mono" placeholder="0" min="0.01" step="0.01">
+          <input type="number" id="fShares" class="form-input mono" placeholder="0" min="0.01" step="0.01" oninput="updateCgtPreview()">
           <span class="form-error" id="errShares"></span>
         </div>
         <div class="form-group">
           <label class="form-label" id="lblPrice">Price Per Share (PKR)</label>
-          <input type="number" id="fPrice" class="form-input mono" placeholder="0.00" min="0.01" step="0.01">
+          <input type="number" id="fPrice" class="form-input mono" placeholder="0.00" min="0.01" step="0.01" oninput="updateCgtPreview()">
           <span class="form-error" id="errPrice"></span>
         </div>
         <div class="form-group" id="commissionGroup">
           <label class="form-label">Commission (PKR)</label>
           <input type="number" id="fCommission" class="form-input mono" placeholder="0.00" min="0" step="0.01" value="0">
+        </div>
+        <div class="form-group" id="cgtGroup" style="display:none">
+          <label class="form-label">Capital Gains Tax (PKR)</label>
+          <input type="number" id="fCgtAmount" class="form-input mono" placeholder="0.00" min="0" step="0.01" value="0">
+          <span class="form-error" id="cgtHint" style="color:var(--txt3)"></span>
         </div>
         <div class="form-group">
           <label class="form-label">Date</label>
@@ -1092,6 +1106,20 @@ a{color:var(--accent);text-decoration:none}
       </div>
       <div style="display:flex;align-items:center;gap:8px">
         <input type="number" id="settingsDivTaxRate" class="form-input mono" style="max-width:100px" min="0" max="100" step="0.01" onchange="setDividendTaxRate(this.value)">
+        <span style="font-size:13px;color:var(--txt2)">%</span>
+      </div>
+    </div>
+
+    <div class="settings-section">
+      <div class="settings-label">Capital Gains Tax</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
+        Default CGT rate NCCPL withholds on a sell's realized gain (Pakistan's standard rate
+        is currently 15% for active/filer taxpayers). Pre-fills the suggested CGT when you
+        record a Sell — each sale keeps the amount that applied to it, so changing this
+        doesn't rewrite past entries.
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="number" id="settingsCgtRate" class="form-input mono" style="max-width:100px" min="0" max="100" step="0.01" onchange="setCgtRate(this.value)">
         <span style="font-size:13px;color:var(--txt2)">%</span>
       </div>
     </div>
@@ -1244,12 +1272,14 @@ let state = {
   transactions: [],
   settings: {
     costMethod: 'weightedAvg',
-    includeCommission: true,
+    includeCommission: false,
     manualPrices: {},
-    dividendTaxRatePct: 15
+    dividendTaxRatePct: 15,
+    cgtRatePct: 15
   },
   prices: {},
-  cash: { balance: 0, entries: [] }
+  cash: { balance: 0, entries: [] },
+  index: null // { value, change, changePct } for KSE100, or null until first fetched
 };
 
 let chartInstances = {};
@@ -1263,6 +1293,7 @@ let chartInstances = {};
    paint before the next live refresh.
 ══════════════════════════════════════════════════════ */
 const PRICES_CACHE_KEY = 'psxPricesCache_v1';
+const INDEX_CACHE_KEY = 'psxIndexCache_v1';
 
 // Returns false (and redirects to the login page) if the session isn't authenticated.
 async function loadState() {
@@ -1287,7 +1318,7 @@ async function loadState() {
     }));
     state.settings = Object.assign({
       costMethod: 'weightedAvg',
-      includeCommission: true,
+      includeCommission: false,
       manualPrices: {}
     }, await settingsRes.json());
     const cashData = await cashRes.json();
@@ -1307,10 +1338,17 @@ function loadPricesCache() {
     const raw = localStorage.getItem(PRICES_CACHE_KEY);
     state.prices = raw ? JSON.parse(raw) : {};
   } catch(e) { state.prices = {}; }
+  try {
+    const raw = localStorage.getItem(INDEX_CACHE_KEY);
+    state.index = raw ? JSON.parse(raw) : null;
+  } catch(e) { state.index = null; }
 }
 
 function savePricesCache() {
   try { localStorage.setItem(PRICES_CACHE_KEY, JSON.stringify(state.prices)); } catch(e) {}
+  try {
+    if (state.index) localStorage.setItem(INDEX_CACHE_KEY, JSON.stringify(state.index));
+  } catch(e) {}
 }
 
 /* ══════════════════════════════════════════════════════
@@ -1764,37 +1802,83 @@ async function fetchWithProxy(url, proxyIdx = 0) {
 // current session (e.g. ~494 of PSX's ~757 listed equities on a quiet day) - a thinly
 // traded stock with zero matches is a completely different situation from the proxy/
 // network failing outright, and the caller needs to tell them apart to message honestly.
+function parseMarketWatchHtml(html, wanted) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const rows = doc.querySelectorAll('table.tbl tbody tr');
+  if (rows.length === 0) return null;
+  const results = {};
+  for (const row of rows) {
+    const cells = row.querySelectorAll('td');
+    if (cells.length < 10) continue;
+    const sym = (cells[0].getAttribute('data-search') || cells[0].textContent).trim().toUpperCase();
+    if (!wanted.has(sym)) continue;
+    const price = parseFloat(cells[7].getAttribute('data-order'));
+    const change = parseFloat(cells[8].getAttribute('data-order'));
+    const changePct = parseFloat(cells[9].getAttribute('data-order'));
+    if (price > 0) {
+      results[sym] = { price, change: change || 0, changePct: changePct || 0, status: 'live', updatedAt: Date.now() };
+    }
+  }
+  return results;
+}
+
 async function fetchPSXMarketWatch(symbols) {
-  const url = `https://dps.psx.com.pk/market-watch`;
   const wanted = new Set(symbols.map(s => s.toUpperCase()));
+
+  // Preferred: our own backend fetches this page server-to-server. The third-party CORS
+  // proxies below were silently truncating this ~470KB page, dropping most symbols from
+  // what the browser actually received (confirmed by testing directly against PSX) -
+  // this sidesteps both CORS and any proxy's size/reliability limits.
+  try {
+    const res = await fetch('/api/prices/market-watch', { credentials: 'include', signal: AbortSignal.timeout(15000) });
+    if (res.ok) {
+      const results = parseMarketWatchHtml(await res.text(), wanted);
+      if (results && Object.keys(results).length > 0) return { ok: true, results };
+    }
+  } catch(e) { /* fall through to the CORS proxies below */ }
+
+  const url = `https://dps.psx.com.pk/market-watch`;
   let anySucceeded = false;
   for (let i = 0; i < CORS_PROXIES.length; i++) {
     try {
       const res = await fetchWithProxy(url, i);
-      const html = await res.text();
-      const doc = new DOMParser().parseFromString(html, 'text/html');
-      const rows = doc.querySelectorAll('table.tbl tbody tr');
-      if (rows.length === 0) continue;
+      const results = parseMarketWatchHtml(await res.text(), wanted);
+      if (results === null) continue;
       anySucceeded = true;
-      const results = {};
-      for (const row of rows) {
-        const cells = row.querySelectorAll('td');
-        if (cells.length < 10) continue;
-        const sym = (cells[0].getAttribute('data-search') || cells[0].textContent).trim().toUpperCase();
-        if (!wanted.has(sym)) continue;
-        const price = parseFloat(cells[7].getAttribute('data-order'));
-        const change = parseFloat(cells[8].getAttribute('data-order'));
-        const changePct = parseFloat(cells[9].getAttribute('data-order'));
-        if (price > 0) {
-          results[sym] = { price, change: change || 0, changePct: changePct || 0, status: 'live', updatedAt: Date.now() };
-        }
-      }
       // A proxy that parsed fine but matched none of our symbols might just have
       // stale/partial data - still worth trying the next proxy before giving up.
       if (Object.keys(results).length > 0) return { ok: true, results };
     } catch(e) { continue; }
   }
   return { ok: anySucceeded, results: {} };
+}
+
+// PSX's /indices page (separate from market-watch) carries KSE100 and friends in a
+// server-rendered table, one row per index, identified by a data-code attribute rather
+// than by visible text - Current/Change/%Change are columns 3/4/5, same data-order
+// convention as the market-watch table. This "last market day change" reflects
+// whatever session PSX most recently closed/is running - there's no separate
+// "yesterday vs today" distinction to make here, PSX's own Change column already means that.
+function parseIndexHtml(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  const link = doc.querySelector('a[data-code="KSE100"]');
+  const row = link ? link.closest('tr') : null;
+  if (!row) return null;
+  const cells = row.querySelectorAll('td');
+  if (cells.length < 6) return null;
+  const value = parseFloat(cells[3].getAttribute('data-order'));
+  const change = parseFloat(cells[4].getAttribute('data-order'));
+  const changePct = parseFloat(cells[5].getAttribute('data-order'));
+  if (!(value > 0)) return null;
+  return { value, change: change || 0, changePct: changePct || 0, updatedAt: Date.now() };
+}
+
+async function fetchPSXIndex() {
+  try {
+    const res = await fetch('/api/prices/indices', { credentials: 'include', signal: AbortSignal.timeout(15000) });
+    if (!res.ok) return null;
+    return parseIndexHtml(await res.text());
+  } catch(e) { return null; }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -2654,7 +2738,7 @@ function handleSymbolInput() {
 
 let isFetching = false;
 
-async function refreshPrices() {
+async function refreshPrices(silent = false) {
   if (isFetching) return;
   isFetching = true;
 
@@ -2669,8 +2753,12 @@ async function refreshPrices() {
     state.transactions.map(t => t.symbol)
   )];
 
+  // KSE100 is fetched regardless of whether there's a portfolio yet - it's independent
+  // market context, not tied to any holding.
+  fetchPSXIndex().then(idx => { if (idx) { state.index = idx; savePricesCache(); renderKPIs(); } });
+
   if (symbols.length === 0) {
-    toast('No symbols to fetch', 'info');
+    if (!silent) toast('No symbols to fetch', 'info');
     isFetching = false;
     icon.className = '';
     icon.textContent = '↻';
@@ -2721,6 +2809,11 @@ async function refreshPrices() {
   btn.disabled = false;
   isFetching = false;
 
+  // The automatic once-a-minute tick stays quiet - the status dot and "last updated"
+  // time already give visual confirmation without a toast firing every 60 seconds.
+  // The manual Refresh button always reports back, since that's an explicit action.
+  if (silent) return;
+
   if (fetched > 0) {
     toast(`Prices updated: ${fetched} live, ${failed} fallback`, 'success');
   } else if (!fetchSucceeded) {
@@ -2766,6 +2859,12 @@ function renderKPIs() {
   // Color KPI cards
   colorKPI('kpiUnrealized', totalUnrealized);
   colorKPI('kpiDayChg', totalDayChange);
+
+  if (state.index) {
+    setText('kv-index', fNum(state.index.value));
+    setText('kv-index-chg', `${fPKR(state.index.change, true)} (${fPct(state.index.changePct, true)})`);
+    colorKPI('kpiIndex', state.index.change);
+  }
 
   // Method label
   const ml = document.getElementById('methodLabel');
@@ -3151,6 +3250,48 @@ function renderCharts() {
       }
     });
   }
+
+  // ── 7. Monthly Cash Flow ──────────────────────────────────
+  destroyChart('cashFlowChart');
+  {
+    // Real money movement only, keyed off the auto-linked CashEntry each buy/sell
+    // creates (see POST /api/ledger) — opening positions and imports never get one
+    // (SkipCashEntry), so they're naturally excluded without checking Notes text.
+    const byMonth = {};
+    const ensure = m => byMonth[m] || (byMonth[m] = { injected: 0, bought: 0, sold: 0 });
+    for (const c of state.cash.entries) {
+      const month = c.date.slice(0, 7);
+      if (c.type === 'deposit' && c.ledgerEntryId == null) {
+        ensure(month).injected += c.amount;
+      } else if (c.type === 'withdrawal' && c.ledgerEntryId != null) {
+        ensure(month).bought += c.amount;
+      } else if (c.type === 'deposit' && c.ledgerEntryId != null) {
+        ensure(month).sold += c.amount;
+      }
+    }
+    const months = Object.keys(byMonth).sort();
+    if (months.length) {
+      chartInstances.cashFlowChart = new Chart(document.getElementById('cashFlowChart'), {
+        type: 'bar',
+        data: {
+          labels: months,
+          datasets: [
+            { label: 'Cash Injected', data: months.map(m => +byMonth[m].injected.toFixed(2)), backgroundColor: '#1a56db', borderRadius: 3, borderSkipped: false },
+            { label: 'Stocks Bought', data: months.map(m => +byMonth[m].bought.toFixed(2)), backgroundColor: '#b91c1c', borderRadius: 3, borderSkipped: false },
+            { label: 'Stocks Sold', data: months.map(m => +byMonth[m].sold.toFixed(2)), backgroundColor: '#0a6e42', borderRadius: 3, borderSkipped: false }
+          ]
+        },
+        options: {
+          responsive: true, maintainAspectRatio: false,
+          plugins: {
+            legend: { position: 'top', labels: { color: '#64748b', font: { size: 11, family: "'Space Grotesk'" }, boxWidth: 12 } },
+            tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: PKR ${fPKR(ctx.raw)}` } }
+          },
+          scales: { x: axisStyle(), y: axisStyle() }
+        }
+      });
+    }
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -3160,8 +3301,11 @@ function renderTopMovers() {
   const { holdings } = getEnrichedHoldings();
   const withReturn = holdings.filter(h => h.returnPct != null);
   const sorted = [...withReturn].sort((a,b) => b.returnPct - a.returnPct);
-  const gainers = sorted.slice(0, 3);
-  const losers  = sorted.slice(-3).reverse();
+  // Split by sign, not by position - slice(0,3)/slice(-3) overlap (and can mislabel a
+  // losing holding as a "gainer") whenever there are fewer than 6 priced holdings, e.g.
+  // a single holding would appear as both the top gainer AND the top loser.
+  const gainers = sorted.filter(h => h.returnPct >= 0).slice(0, 3);
+  const losers  = sorted.filter(h => h.returnPct < 0).slice(-3).reverse();
 
   function moverRow(h) {
     const cls = h.returnPct >= 0 ? 'val-pos' : 'val-neg';
@@ -3383,7 +3527,9 @@ function renderCashLedger() {
   tbody.innerHTML = sorted.map(c => {
     const taxSubtext = (c.type === 'dividend' && c.grossAmount != null)
       ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Gross ${fPKR(c.grossAmount)} − Tax ${fPKR(c.grossAmount - c.amount)} (${fPct(c.taxRatePct||0)})</span>`
-      : '';
+      : (c.cgtAmount != null
+        ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">CGT withheld: ${fPKR(c.cgtAmount)}</span>`
+        : '');
     // Auto-linked entries from a stock buy/sell get their own label (Purchase/Sale)
     // instead of the generic Withdrawal/Deposit, so they read distinctly from a manual
     // cash movement - color/sign is still driven by the underlying type either way.
@@ -3498,7 +3644,8 @@ async function addTransaction(data) {
     commission: parseFloat(data.commission) || 0,
     date: data.date,
     notes: data.notes || '',
-    skipCashEntry: !!data.skipCashEntry
+    skipCashEntry: !!data.skipCashEntry,
+    cgtAmount: data.type === 'sell' ? (parseFloat(data.cgtAmount) || 0) : 0
   };
 
   // Client-side pre-check for instant feedback — the server re-validates this
@@ -3535,7 +3682,7 @@ async function addTransaction(data) {
     if (!payload.skipCashEntry) {
       await reloadCash();
       const total = tx.shares * tx.price;
-      const cashAmount = tx.type === 'buy' ? total + tx.commission : total - tx.commission;
+      const cashAmount = tx.type === 'buy' ? total + tx.commission : total - tx.commission - payload.cgtAmount;
       const cashNote = cashAmount > 0
         ? (tx.type === 'buy' ? ` — PKR ${fPKR(cashAmount)} deducted from free cash` : ` — PKR ${fPKR(cashAmount)} credited to free cash`)
         : '';
@@ -4051,6 +4198,41 @@ function updateSellAvailable() {
   } else {
     div.style.display = 'none';
   }
+  updateCgtPreview();
+}
+
+// Suggests CGT for a Sell using the CURRENT (pre-this-sale) avg cost for the symbol -
+// the same figure already shown as "Avg Cost" in the Holdings table, from whichever
+// cost method (WA/FIFO) is active - and the default CGT rate from Settings. Only a
+// starting value: the field stays editable so the user can correct it against their
+// actual contract note, same contract as the dividend gross/tax fields.
+function updateCgtPreview() {
+  const group = document.getElementById('cgtGroup');
+  const hint = document.getElementById('cgtHint');
+  if (!group) return;
+
+  if (currentTxType !== 'sell') {
+    group.style.display = 'none';
+    return;
+  }
+  group.style.display = '';
+
+  const sym = (document.getElementById('fSymbol')?.value || '').toUpperCase();
+  const shares = parseFloat(document.getElementById('fShares')?.value);
+  const price = parseFloat(document.getElementById('fPrice')?.value);
+  const holding = sym ? computeHoldings()[sym] : null;
+
+  if (!holding || !shares || !price) {
+    hint.textContent = 'Enter symbol, shares and price for a CGT suggestion';
+    return;
+  }
+
+  const gain = shares * (price - holding.avgCost);
+  const suggested = Math.max(0, gain) * (state.settings.cgtRatePct / 100);
+  document.getElementById('fCgtAmount').value = suggested.toFixed(2);
+  hint.textContent = gain > 0
+    ? `Gain: PKR ${fPKR(gain)} × ${state.settings.cgtRatePct}% — verify against your contract note`
+    : `No gain vs avg cost PKR ${fPKR(holding.avgCost)} — CGT normally 0`;
 }
 
 function clearForm() {
@@ -4060,6 +4242,7 @@ function clearForm() {
     if (el) el.value = '';
   });
   document.getElementById('fCommission').value = '0';
+  document.getElementById('fCgtAmount').value = '0';
   document.getElementById('fDate').value = new Date().toISOString().split('T')[0];
   ['errSymbol','errSector','errShares','errPrice','errDate'].forEach(id => {
     const el = document.getElementById(id);
@@ -4085,6 +4268,7 @@ async function submitTransaction() {
   const shares  = parseFloat(document.getElementById('fShares').value);
   const price   = parseFloat(document.getElementById('fPrice').value);
   const comm    = parseFloat(document.getElementById('fCommission').value) || 0;
+  const cgtAmount = type === 'sell' ? (parseFloat(document.getElementById('fCgtAmount').value) || 0) : 0;
   const date    = document.getElementById('fDate').value;
   const notes   = document.getElementById('fNotes').value;
 
@@ -4110,7 +4294,7 @@ async function submitTransaction() {
   }
   if (!valid) return;
 
-  const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, date, notes, skipCashEntry: openingMode });
+  const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, date, notes, skipCashEntry: openingMode, cgtAmount });
   if (ok) closeModal();
 }
 
@@ -4226,6 +4410,19 @@ function setDividendTaxRate(value) {
   toast(`Default dividend tax rate set to ${rate}%`, 'info');
 }
 
+function setCgtRate(value) {
+  const rate = parseFloat(value);
+  if (isNaN(rate) || rate < 0 || rate > 100) {
+    toast('Tax rate must be between 0 and 100', 'error');
+    renderSettingsUI();
+    return;
+  }
+  const prev = cloneSettings();
+  state.settings.cgtRatePct = rate;
+  pushSettings(prev);
+  toast(`Default CGT rate set to ${rate}%`, 'info');
+}
+
 function setOwnerName(value) {
   const prev = cloneSettings();
   state.settings.ownerName = value.trim() || null;
@@ -4306,6 +4503,12 @@ function renderSettingsUI() {
   const taxRateInput = document.getElementById('settingsDivTaxRate');
   if (taxRateInput && document.activeElement !== taxRateInput) {
     taxRateInput.value = state.settings.dividendTaxRatePct;
+  }
+
+  // CGT rate
+  const cgtRateInput = document.getElementById('settingsCgtRate');
+  if (cgtRateInput && document.activeElement !== cgtRateInput) {
+    cgtRateInput.value = state.settings.cgtRatePct;
   }
 
   // Manual prices
@@ -4609,6 +4812,14 @@ async function init() {
   renderAll();
   loadPsxSymbols();
   checkImportLocalData();
+
+  // Live prices/index on load, then every minute - refreshPrices() already guards
+  // against overlapping runs via isFetching, so a slow call just gets skipped by the
+  // next tick rather than stacking up. silent=true suppresses the toast so a background
+  // tick doesn't interrupt the user every 60 seconds - the manual Refresh button (not
+  // silent) still reports back explicitly.
+  refreshPrices(true);
+  setInterval(() => refreshPrices(true), 60 * 1000);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
