@@ -1874,11 +1874,27 @@ function parseIndexHtml(html) {
 }
 
 async function fetchPSXIndex() {
+  // Preferred: our own backend fetches this page server-to-server (same approach as
+  // fetchPSXMarketWatch). Unlike market-watch, this had no fallback at all - a single
+  // transient failure (timeout/502) left the KSE-100 card stuck on stale cached data
+  // with no retry until the next scheduled refresh happened to succeed.
   try {
     const res = await fetch('/api/prices/indices', { credentials: 'include', signal: AbortSignal.timeout(15000) });
-    if (!res.ok) return null;
-    return parseIndexHtml(await res.text());
-  } catch(e) { return null; }
+    if (res.ok) {
+      const parsed = parseIndexHtml(await res.text());
+      if (parsed) return parsed;
+    }
+  } catch(e) { /* fall through to the CORS proxies below */ }
+
+  const url = `https://dps.psx.com.pk/indices`;
+  for (let i = 0; i < CORS_PROXIES.length; i++) {
+    try {
+      const res = await fetchWithProxy(url, i);
+      const parsed = parseIndexHtml(await res.text());
+      if (parsed) return parsed;
+    } catch(e) { continue; }
+  }
+  return null;
 }
 
 /* ══════════════════════════════════════════════════════
