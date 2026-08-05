@@ -436,6 +436,37 @@ prices.MapPost("/historical", async (HistoricalPriceRequest req, PsxHistoricalPr
     return Results.Ok(new { prices = pricesOut, asOfDates = asOfOut });
 });
 
+// Direct server-to-server fetches of PSX's HTML pages (market-watch, indices) started
+// getting rejected outright from this host's IP - confirmed by PsxHistoricalPriceService's
+// JSON /timeseries/eod calls still working fine from the very same server while these two
+// consistently came back as errors, so it's specific to these HTML pages (likely PSX's
+// edge/WAF treating full-page scrapes more strictly than its data API), not a blanket
+// block. r.jina.ai's Reader API fetches from its own infrastructure and, asked for
+// X-Return-Format: html, hands back the raw page - used as a fallback so this doesn't
+// depend on a client-side CORS proxy that the browser would need to be pointed at.
+static async Task<IResult> FetchPsxHtmlAsync(HttpClient client, string psxPath)
+{
+    var url = $"https://dps.psx.com.pk/{psxPath}";
+    try
+    {
+        var html = await client.GetStringAsync(url);
+        return Results.Content(html, "text/html");
+    }
+    catch (Exception)
+    {
+        try
+        {
+            var req = new HttpRequestMessage(HttpMethod.Get, $"https://r.jina.ai/{url}");
+            req.Headers.Add("X-Return-Format", "html");
+            var res = await client.SendAsync(req);
+            if (res.IsSuccessStatusCode)
+                return Results.Content(await res.Content.ReadAsStringAsync(), "text/html");
+        }
+        catch (Exception) { /* fall through to 502 below */ }
+        return Results.StatusCode(StatusCodes.Status502BadGateway);
+    }
+}
+
 // Server-side pass-through for PSX's live market-watch page - see the AddHttpClient()
 // comment above for why this exists instead of the client fetching it directly via a
 // third-party CORS proxy. Returns the raw HTML unchanged; the frontend's existing
@@ -444,16 +475,8 @@ prices.MapPost("/historical", async (HistoricalPriceRequest req, PsxHistoricalPr
 prices.MapGet("/market-watch", async (IHttpClientFactory httpFactory) =>
 {
     var client = httpFactory.CreateClient();
-    client.Timeout = TimeSpan.FromSeconds(15);
-    try
-    {
-        var html = await client.GetStringAsync("https://dps.psx.com.pk/market-watch");
-        return Results.Content(html, "text/html");
-    }
-    catch (Exception)
-    {
-        return Results.StatusCode(StatusCodes.Status502BadGateway);
-    }
+    client.Timeout = TimeSpan.FromSeconds(20);
+    return await FetchPsxHtmlAsync(client, "market-watch");
 });
 
 // Same server-to-server pass-through, for PSX's /indices page (KSE100 and friends) -
@@ -461,16 +484,8 @@ prices.MapGet("/market-watch", async (IHttpClientFactory httpFactory) =>
 prices.MapGet("/indices", async (IHttpClientFactory httpFactory) =>
 {
     var client = httpFactory.CreateClient();
-    client.Timeout = TimeSpan.FromSeconds(15);
-    try
-    {
-        var html = await client.GetStringAsync("https://dps.psx.com.pk/indices");
-        return Results.Content(html, "text/html");
-    }
-    catch (Exception)
-    {
-        return Results.StatusCode(StatusCodes.Status502BadGateway);
-    }
+    client.Timeout = TimeSpan.FromSeconds(20);
+    return await FetchPsxHtmlAsync(client, "indices");
 });
 
 // ── CASH LEDGER ───────────────────────────────────────────────────────
