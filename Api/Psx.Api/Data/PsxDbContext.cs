@@ -56,6 +56,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.Property(c => c.GrossAmount).HasColumnType("decimal(18,4)");
             b.Property(c => c.TaxRatePct).HasColumnType("decimal(5,2)");
             b.Property(c => c.CgtAmount).HasColumnType("decimal(18,4)");
+            b.Property(c => c.CdcHoldAmount).HasColumnType("decimal(18,4)");
             b.Property(c => c.Symbol).HasMaxLength(20);
             b.Property(c => c.Notes).HasMaxLength(1000);
             b.HasIndex(c => c.UserId);

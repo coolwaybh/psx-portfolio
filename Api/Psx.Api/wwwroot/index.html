@@ -891,7 +891,7 @@ a{color:var(--accent);text-decoration:none}
           <span class="form-error" id="errCfAmount"></span>
         </div>
         <div class="form-group" id="cfGrossGroup" style="display:none">
-          <label class="form-label">Gross Amount (PKR)</label>
+          <label class="form-label" id="cfGrossLabel">Gross Amount (PKR)</label>
           <input type="number" id="cfGrossAmount" class="form-input mono" placeholder="0.00" min="0.01" step="0.01" oninput="updateDividendNetPreview()">
           <span class="form-error" id="errCfGrossAmount"></span>
         </div>
@@ -900,10 +900,15 @@ a{color:var(--accent);text-decoration:none}
           <input type="number" id="cfTaxRatePct" class="form-input mono" min="0" max="100" step="0.01" oninput="updateDividendNetPreview()">
           <span class="form-error" id="errCfTaxRatePct"></span>
         </div>
+        <div class="form-group" id="cfCdcHoldGroup" style="display:none">
+          <label class="form-label">CDC Hold Against Charges/Dues (PKR)</label>
+          <input type="number" id="cfCdcHoldAmount" class="form-input mono" placeholder="0.00" min="0" step="0.01" oninput="updateDividendNetPreview()">
+          <span class="form-error" id="errCfCdcHoldAmount"></span>
+        </div>
         <div class="form-group full" id="cfNetPreviewGroup" style="display:none">
           <div style="background:var(--elevated);border:1px solid var(--border);border-radius:var(--r);padding:8px 12px;font-size:12px;color:var(--txt2);display:flex;justify-content:space-between">
-            <span>Tax withheld: <span id="cfTaxPreview" class="mono">—</span></span>
-            <span>Net received: <span id="cfNetPreview" class="mono" style="font-weight:700;color:var(--txt)">—</span></span>
+            <span><span id="cfDeductionLabelText">Tax withheld</span>: <span id="cfTaxPreview" class="mono">—</span></span>
+            <span><span id="cfNetLabelText">Net received</span>: <span id="cfNetPreview" class="mono" style="font-weight:700;color:var(--txt)">—</span></span>
           </div>
         </div>
         <div class="form-group">
@@ -3543,6 +3548,8 @@ function renderCashLedger() {
   tbody.innerHTML = sorted.map(c => {
     const taxSubtext = (c.type === 'dividend' && c.grossAmount != null)
       ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Gross ${fPKR(c.grossAmount)} − Tax ${fPKR(c.grossAmount - c.amount)} (${fPct(c.taxRatePct||0)})</span>`
+      : (c.type === 'deposit' && c.cdcHoldAmount != null && c.cdcHoldAmount > 0)
+      ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Deposited ${fPKR(c.grossAmount)} − CDC Hold ${fPKR(c.cdcHoldAmount)}</span>`
       : (c.cgtAmount != null
         ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">CGT withheld: ${fPKR(c.cgtAmount)}</span>`
         : '');
@@ -3955,8 +3962,16 @@ async function addCashEntry(data) {
     symbol: data.symbol || null,
     creditToCash: data.creditToCash !== undefined ? data.creditToCash : true,
     grossAmount: data.grossAmount != null ? parseFloat(data.grossAmount) : null,
-    taxRatePct: data.taxRatePct != null ? parseFloat(data.taxRatePct) : null
+    taxRatePct: data.taxRatePct != null ? parseFloat(data.taxRatePct) : null,
+    cdcHoldAmount: data.cdcHoldAmount != null ? parseFloat(data.cdcHoldAmount) : null
   };
+
+  // For dividend/deposit, Amount isn't in the payload directly (the server derives it
+  // from Gross - deduction) - compute the same net here just for the toast message.
+  const netForToast = payload.amount != null ? payload.amount
+    : payload.type === 'deposit' ? payload.grossAmount - (payload.cdcHoldAmount || 0)
+    : payload.type === 'dividend' ? payload.grossAmount * (1 - (payload.taxRatePct || 0) / 100)
+    : payload.grossAmount;
 
   try {
     const res = await fetch('/api/cash', {
@@ -3972,7 +3987,7 @@ async function addCashEntry(data) {
     }
     await reloadCash();
     renderAll();
-    toast(`${payload.type} of PKR ${fPKR(payload.amount)} added`, 'success');
+    toast(`${payload.type} of PKR ${fPKR(netForToast)} added`, 'success');
     return true;
   } catch(e) {
     toast('Network error — could not add cash entry', 'error');
@@ -4025,11 +4040,13 @@ function openCashModal() {
   document.getElementById('cfAmount').value = '';
   document.getElementById('cfGrossAmount').value = '';
   document.getElementById('cfTaxRatePct').value = state.settings.dividendTaxRatePct;
+  document.getElementById('cfCdcHoldAmount').value = '';
   document.getElementById('cfDate').value = new Date().toISOString().split('T')[0];
   document.getElementById('cfNotes').value = '';
   document.getElementById('errCfAmount').textContent = '';
   document.getElementById('errCfGrossAmount').textContent = '';
   document.getElementById('errCfTaxRatePct').textContent = '';
+  document.getElementById('errCfCdcHoldAmount').textContent = '';
   document.getElementById('errCfDate').textContent = '';
   document.getElementById('errCfSymbol').textContent = '';
   setCreditToCash(true);
@@ -4041,23 +4058,35 @@ function closeCashModal() {
   document.getElementById('cashModalBackdrop').classList.remove('open');
 }
 
+// Deposit's "CDC hold" and Dividend's "withholding tax" are the same shape (a
+// pre-deduction gross amount minus a per-entry deduction, previewed live) but the
+// deduction is a flat PKR amount for one and a rate for the other - hence two input
+// groups sharing one preview box, swapped by type rather than genuinely unified.
 function updateCashModalMode() {
-  const isDividend = document.getElementById('cfType').value === 'dividend';
+  const type = document.getElementById('cfType').value;
+  const isDividend = type === 'dividend';
+  const isCdcDeposit = type === 'deposit';
   document.getElementById('cfSymbolGroup').style.display = isDividend ? '' : 'none';
   document.getElementById('cfCreditGroup').style.display = isDividend ? '' : 'none';
-  document.getElementById('cfAmountGroup').style.display = isDividend ? 'none' : '';
-  document.getElementById('cfGrossGroup').style.display = isDividend ? '' : 'none';
+  document.getElementById('cfAmountGroup').style.display = (isDividend || isCdcDeposit) ? 'none' : '';
+  document.getElementById('cfGrossGroup').style.display = (isDividend || isCdcDeposit) ? '' : 'none';
+  document.getElementById('cfGrossLabel').textContent = isCdcDeposit ? 'Amount Deposited (PKR)' : 'Gross Amount (PKR)';
   document.getElementById('cfTaxRateGroup').style.display = isDividend ? '' : 'none';
-  document.getElementById('cfNetPreviewGroup').style.display = isDividend ? '' : 'none';
-  if (isDividend) updateDividendNetPreview();
+  document.getElementById('cfCdcHoldGroup').style.display = isCdcDeposit ? '' : 'none';
+  document.getElementById('cfNetPreviewGroup').style.display = (isDividend || isCdcDeposit) ? '' : 'none';
+  document.getElementById('cfDeductionLabelText').textContent = isCdcDeposit ? 'Held by CDC' : 'Tax withheld';
+  document.getElementById('cfNetLabelText').textContent = isCdcDeposit ? 'Credited to free cash' : 'Net received';
+  if (isDividend || isCdcDeposit) updateDividendNetPreview();
 }
 
 function updateDividendNetPreview() {
+  const isCdcDeposit = document.getElementById('cfType').value === 'deposit';
   const gross = parseFloat(document.getElementById('cfGrossAmount').value) || 0;
-  const rate  = parseFloat(document.getElementById('cfTaxRatePct').value) || 0;
-  const tax   = gross * rate / 100;
-  const net   = gross - tax;
-  document.getElementById('cfTaxPreview').textContent = `PKR ${fPKR(tax)}`;
+  const deduction = isCdcDeposit
+    ? (parseFloat(document.getElementById('cfCdcHoldAmount').value) || 0)
+    : (gross * (parseFloat(document.getElementById('cfTaxRatePct').value) || 0) / 100);
+  const net = gross - deduction;
+  document.getElementById('cfTaxPreview').textContent = `PKR ${fPKR(deduction)}`;
   document.getElementById('cfNetPreview').textContent = `PKR ${fPKR(net)}`;
 }
 
@@ -4071,6 +4100,7 @@ async function submitCashEntry() {
   document.getElementById('errCfAmount').textContent = '';
   document.getElementById('errCfGrossAmount').textContent = '';
   document.getElementById('errCfTaxRatePct').textContent = '';
+  document.getElementById('errCfCdcHoldAmount').textContent = '';
   document.getElementById('errCfDate').textContent = '';
   document.getElementById('errCfSymbol').textContent = '';
   let valid = true;
@@ -4081,7 +4111,7 @@ async function submitCashEntry() {
   const notes        = document.getElementById('cfNotes').value;
   const creditToCash = document.getElementById('cfCreditToCash').value === 'true';
 
-  let amount = null, grossAmount = null, taxRatePct = null;
+  let amount = null, grossAmount = null, taxRatePct = null, cdcHoldAmount = null;
 
   if (type === 'dividend') {
     if (!symbol) {
@@ -4098,6 +4128,19 @@ async function submitCashEntry() {
       document.getElementById('errCfTaxRatePct').textContent = 'Must be 0–100';
       valid = false;
     }
+  } else if (type === 'deposit') {
+    // CDC hold defaults to 0 (a plain deposit that never went through CDC's top-up
+    // flow) - only Gross Amount is actually required here.
+    grossAmount = parseFloat(document.getElementById('cfGrossAmount').value);
+    cdcHoldAmount = parseFloat(document.getElementById('cfCdcHoldAmount').value) || 0;
+    if (!grossAmount || grossAmount <= 0) {
+      document.getElementById('errCfGrossAmount').textContent = 'Must be a positive number';
+      valid = false;
+    }
+    if (cdcHoldAmount < 0 || cdcHoldAmount >= grossAmount) {
+      document.getElementById('errCfCdcHoldAmount').textContent = 'Must be less than the deposit amount';
+      valid = false;
+    }
   } else {
     amount = parseFloat(document.getElementById('cfAmount').value);
     if (!amount || amount <= 0) {
@@ -4111,7 +4154,7 @@ async function submitCashEntry() {
   }
   if (!valid) return;
 
-  const ok = await addCashEntry({ type, symbol, amount, date, notes, creditToCash, grossAmount, taxRatePct });
+  const ok = await addCashEntry({ type, symbol, amount, date, notes, creditToCash, grossAmount, taxRatePct, cdcHoldAmount });
   if (ok) closeCashModal();
 }
 

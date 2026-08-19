@@ -722,6 +722,7 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
     decimal amount;
     decimal? grossAmount = null;
     decimal? taxRatePct = null;
+    decimal? cdcHoldAmount = null;
 
     if (type == CashType.Dividend)
     {
@@ -752,6 +753,26 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         taxRatePct = rate;
         amount = Math.Round(gross * (1 - rate / 100m), 4, MidpointRounding.AwayFromZero);
     }
+    else if (type == CashType.Deposit && req.CdcHoldAmount is decimal hold)
+    {
+        // CDC top-up flow: client sends the pre-hold deposit as GrossAmount and the
+        // held-back amount separately - server derives the actually-credited Amount
+        // itself so it can never drift from Gross - Hold (same reasoning as the
+        // dividend branch above never trusting a client-computed net).
+        if (req.GrossAmount is not decimal depositGross || depositGross <= 0)
+        {
+            error = "Deposit amount must be positive.";
+            return false;
+        }
+        if (hold < 0 || hold >= depositGross)
+        {
+            error = "CDC hold amount must be between 0 and the deposit amount.";
+            return false;
+        }
+        grossAmount = depositGross;
+        cdcHoldAmount = hold;
+        amount = depositGross - hold;
+    }
     else
     {
         if (req.Amount is not decimal a || a <= 0)
@@ -772,6 +793,7 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         Symbol = symbol,
         GrossAmount = grossAmount,
         TaxRatePct = taxRatePct,
+        CdcHoldAmount = cdcHoldAmount,
     };
     return true;
 }
@@ -798,13 +820,13 @@ record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shar
         e.TxDate.ToString("yyyy-MM-dd"), e.Notes, e.SplitRatioTo, e.SplitRatioFrom
     );
 }
-record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null);
+record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null, decimal? CdcHoldAmount = null);
 record HistoricalPriceRequest(string Date, List<string>? Symbols);
-record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId, decimal? CgtAmount)
+record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId, decimal? CgtAmount, decimal? CdcHoldAmount)
 {
     public static CashDto From(CashEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes,
-        e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct, e.LedgerEntryId, e.CgtAmount
+        e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct, e.LedgerEntryId, e.CgtAmount, e.CdcHoldAmount
     );
 }
 

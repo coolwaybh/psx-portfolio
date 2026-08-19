@@ -31,8 +31,21 @@ public class CashEntry
     // and TaxRatePct is the rate actually applied to THIS entry (not the live settings
     // default - stored per-entry so a later change to the default never rewrites history).
     // Tax paid on this entry = GrossAmount - Amount (derived, not stored separately).
+    // Also reused (Deposit only, see CdcHoldAmount below) as the pre-hold amount actually
+    // wired to CDC's Roshan Digital account - not the same "gross" concept as a dividend's
+    // pre-tax amount, but the same shape (pre-deduction figure paired with a net Amount).
     public decimal? GrossAmount { get; set; }
     public decimal? TaxRatePct { get; set; }
+
+    // Set ONLY on a Deposit funded via CDC's Roshan Digital top-up flow. CDC holds back a
+    // variable amount from every top-up against its own charges/dues (maintaining a ~PKR
+    // 5,000 buffer on their side) before wiring the rest through - confirmed by their
+    // "Confirmation of Fund Transfer" email, which states Amount Deposit, Amount Hold
+    // Against Charges/Dues, and Amount Transferred To Exposure separately. It is NOT a
+    // fixed rate (varies top-up to top-up depending on CDC's buffer at the time), so unlike
+    // TaxRatePct this is entered per-entry, never defaulted. Amount above is always
+    // GrossAmount - CdcHoldAmount (the actually-transferred/exposure figure).
+    public decimal? CdcHoldAmount { get; set; }
 
     // Set ONLY when this entry is the auto-linked Deposit from a Sell (LedgerEntryId
     // below) that realized a gain — Pakistan's NCCPL withholds Capital Gains Tax at
