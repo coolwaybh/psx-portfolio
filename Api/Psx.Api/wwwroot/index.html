@@ -949,6 +949,22 @@ a{color:var(--accent);text-decoration:none}
   </div>
 </div>
 
+<!-- ── SYMBOL DETAIL MODAL ────────────────────────────────────── -->
+<div class="modal-backdrop" id="symbolDetailBackdrop" onclick="if(event.target===this) closeSymbolDetailModal()">
+  <div class="modal">
+    <div class="modal-hd">
+      <div class="modal-title" id="symbolDetailTitle">Symbol Detail</div>
+      <button class="btn btn-icon btn-sm" onclick="closeSymbolDetailModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="symbolDetailBody"></div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" onclick="closeSymbolDetailModal()">Close</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── ADD TRANSACTION MODAL ──────────────────────────────────── -->
 <div class="modal-backdrop" id="modalBackdrop" onclick="handleBackdropClick(event)">
   <div class="modal">
@@ -3022,6 +3038,7 @@ function renderHoldingsTable() {
       <td style="text-align:center">${renderSignalCell(h.symbol)}</td>
       <td style="text-align:center">
         <button class="btn btn-sm" onclick="addTxForSymbol('${escapeForJsAttr(h.symbol)}','${escapeForJsAttr(h.sector||'')}')">+ Tx</button>
+        <button class="btn btn-sm" onclick="openSymbolDetailModal('${escapeForJsAttr(h.symbol)}')" title="Realized/Unrealized/Dividends for this symbol">Details</button>
       </td>
     </tr>`;
   }).join('');
@@ -3387,6 +3404,7 @@ function renderRealizedPL() {
             <th style="text-align:left">Symbol</th>
             <th>Realized P&amp;L</th>
             <th>Dividends Earned</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -3396,6 +3414,7 @@ function renderRealizedPL() {
             <td style="text-align:left"><span class="sym">${escapeHtml(r.symbol)}</span></td>
             <td class="${r.realized >= 0 ? 'val-pos':'val-neg'}">${fPKR(r.realized, true)}</td>
             <td class="${div > 0 ? 'val-pos' : 'val-neu'}">${div > 0 ? fPKR(div) : '—'}</td>
+            <td style="text-align:center"><button class="btn btn-sm" onclick="openSymbolDetailModal('${escapeForJsAttr(r.symbol)}')">Details</button></td>
           </tr>`;
           }).join('')}
         </tbody>
@@ -3533,6 +3552,112 @@ function getSymbolDividendTotal(symbol) {
   return state.cash.entries
     .filter(c => c.type === 'dividend' && c.symbol === symbol)
     .reduce((sum, c) => sum + c.amount, 0);
+}
+
+/* ══════════════════════════════════════════════════════
+   SYMBOL DETAIL — realized + unrealized + dividends for one script
+══════════════════════════════════════════════════════ */
+// Pulls together three numbers that otherwise only exist in separate places (Holdings
+// table has unrealized, Realized P&L section has realized, Transaction Log's symbol
+// filter shows dividends) into one per-symbol view. unrealizedPL is null (not 0) when the
+// position is fully closed - "no unrealized gain" and "nothing left to have a gain on"
+// are different things and the UI needs to tell them apart.
+function computeSymbolDetail(symbol) {
+  const sym = symbol.toUpperCase();
+  const { bySymbol } = computeRealizedPL();
+  const realized = bySymbol[sym] ? bySymbol[sym].realized : 0;
+
+  const { holdings } = getEnrichedHoldings();
+  const holding = holdings.find(h => h.symbol === sym) || null;
+  const dividends = getSymbolDividendTotal(sym);
+  const totalReturn = realized + (holding?.unrealizedPL || 0) + dividends;
+
+  const dividendEntries = state.cash.entries.filter(c => c.type === 'dividend' && c.symbol === sym);
+  const history = [
+    ...state.transactions.filter(t => t.symbol === sym).map(t => ({ kind: 'ledger', ...t })),
+    ...dividendEntries.map(c => ({ kind: 'dividend', id: c.id, type: 'dividend', date: c.date, amount: c.amount, notes: c.notes }))
+  ].sort((a,b) => new Date(b.date) - new Date(a.date) || b.id - a.id);
+
+  return { symbol: sym, realized, holding, dividends, totalReturn, history };
+}
+
+function openSymbolDetailModal(symbol) {
+  document.getElementById('symbolDetailTitle').textContent = symbol.toUpperCase();
+  renderSymbolDetailModal(symbol);
+  document.getElementById('symbolDetailBackdrop').classList.add('open');
+}
+
+function closeSymbolDetailModal() {
+  document.getElementById('symbolDetailBackdrop').classList.remove('open');
+}
+
+function renderSymbolDetailModal(symbol) {
+  const d = computeSymbolDetail(symbol);
+  const body = document.getElementById('symbolDetailBody');
+
+  const unrealizedHtml = d.holding
+    ? `<span class="${d.holding.unrealizedPL >= 0 ? 'val-pos':'val-neg'}">${fPKR(d.holding.unrealizedPL, true)}</span>`
+    : `<span class="val-neu">Position closed</span>`;
+
+  const positionHtml = d.holding
+    ? `<div class="form-group full" style="margin-top:12px;font-size:12px;color:var(--txt2)">
+         Currently holding <strong>${fNum(d.holding.shares)}</strong> shares @ avg cost ${fPKR(d.holding.avgCost)}
+         ${d.holding.mktPrice != null ? ` — mkt price ${fPKR(d.holding.mktPrice)}` : ''}
+       </div>`
+    : '';
+
+  const historyRows = d.history.map(h => {
+    if (h.kind === 'dividend') {
+      return `<tr>
+        <td style="text-align:left;font-family:var(--mono)">${h.date}</td>
+        <td style="text-align:left"><span class="tx-type dividend">DIVIDEND</span></td>
+        <td class="val-pos">+${fPKR(h.amount)}</td>
+        <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(h.notes)||'—'}</td>
+      </tr>`;
+    }
+    if (h.type === 'split') {
+      return `<tr>
+        <td style="text-align:left;font-family:var(--mono)">${h.date}</td>
+        <td style="text-align:left"><span class="tx-type split">SPLIT</span></td>
+        <td class="val-neu">${fNum(h.splitRatioTo)}:${fNum(h.splitRatioFrom)}</td>
+        <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(h.notes)||'—'}</td>
+      </tr>`;
+    }
+    const total = h.shares * h.price;
+    return `<tr>
+      <td style="text-align:left;font-family:var(--mono)">${h.date}</td>
+      <td style="text-align:left"><span class="tx-type ${h.type}">${h.type.toUpperCase()}</span></td>
+      <td class="${h.type==='sell'?'val-pos':'val-neg'}">${h.type==='sell'?'+':'-'}${fPKR(total)} <span style="color:var(--txt3);font-size:10px">(${fNum(h.shares)} @ ${fPKR(h.price)})</span></td>
+      <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(h.notes)||'—'}</td>
+    </tr>`;
+  }).join('');
+
+  body.innerHTML = `
+    <div class="rpnl-summary">
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Realized P&amp;L</div>
+        <div class="rpnl-val ${d.realized >= 0 ? 'val-pos':'val-neg'}">${fPKR(d.realized, true)}</div>
+      </div>
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Unrealized P&amp;L</div>
+        <div class="rpnl-val">${unrealizedHtml}</div>
+      </div>
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Dividends Earned</div>
+        <div class="rpnl-val ${d.dividends > 0 ? 'val-pos' : ''}">${fPKR(d.dividends)}</div>
+      </div>
+    </div>
+    <div class="form-group full" style="margin-top:8px;text-align:center;padding:10px;background:var(--elevated);border:1px solid var(--border);border-radius:var(--r)">
+      <span style="font-size:11px;color:var(--txt2);text-transform:uppercase;letter-spacing:.4px">Total Return (Realized + Unrealized + Dividends)</span><br>
+      <span class="mono ${d.totalReturn >= 0 ? 'val-pos':'val-neg'}" style="font-size:18px;font-weight:700">${fPKR(d.totalReturn, true)}</span>
+    </div>
+    ${positionHtml}
+    <div class="tbl-wrap" style="margin-top:16px">
+      <table class="tbl">
+        <thead><tr><th style="text-align:left">Date</th><th style="text-align:left">Type</th><th style="text-align:left">Amount</th><th style="text-align:left">Notes</th></tr></thead>
+        <tbody>${historyRows || '<tr><td colspan="4"><div class="no-data">No history for this symbol</div></td></tr>'}</tbody>
+      </table>
+    </div>`;
 }
 
 function renderCashLedger() {
