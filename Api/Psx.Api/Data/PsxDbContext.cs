@@ -25,6 +25,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.Property(t => t.Shares).HasColumnType("decimal(18,4)");
             b.Property(t => t.Price).HasColumnType("decimal(18,4)");
             b.Property(t => t.Commission).HasColumnType("decimal(18,4)");
+            b.Property(t => t.NccplCharge).HasColumnType("decimal(18,4)");
             b.Property(t => t.Notes).HasMaxLength(1000);
             b.Property(t => t.Symbol).HasMaxLength(20);
             b.Property(t => t.Sector).HasMaxLength(50);
@@ -42,6 +43,9 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.HasKey(s => s.UserId);
             b.Property(s => s.DividendTaxRatePct).HasColumnType("decimal(5,2)");
             b.Property(s => s.CgtRatePct).HasColumnType("decimal(5,2)");
+            // decimal(7,4), not (5,2) like the rates above - this rate is a fraction of a
+            // percent (0.007%), and (5,2) would round it straight to 0.01.
+            b.Property(s => s.NccplChargeRatePct).HasColumnType("decimal(7,4)");
             b.Property(s => s.OwnerName).HasMaxLength(100);
             b.HasOne(s => s.User)
                 .WithOne(u => u.Settings)

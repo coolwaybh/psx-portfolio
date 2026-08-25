@@ -43,7 +43,15 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Events.OnRedirectToLogin = ctx => { ctx.Response.StatusCode = StatusCodes.Status401Unauthorized; return Task.CompletedTask; };
         options.Events.OnRedirectToAccessDenied = ctx => { ctx.Response.StatusCode = StatusCodes.Status403Forbidden; return Task.CompletedTask; };
     });
-builder.Services.AddAuthorization();
+builder.Services.AddAuthorization(options =>
+{
+    // Gates the small "reset another user's password" admin surface (see /api/admin
+    // below) - checked via a login-time claim rather than a per-request DB lookup, same
+    // tradeoff the cookie itself already makes for UserId/Username. Only ever true for
+    // the account seeded as admin by the AddIsAdmin migration - there's no self-service
+    // way to become an admin (no promote-user endpoint exists, intentionally).
+    options.AddPolicy("Admin", policy => policy.RequireClaim("IsAdmin", "true"));
+});
 
 builder.Services.AddRateLimiter(options =>
 {
@@ -137,10 +145,12 @@ auth.MapPost("/login", async (AuthRequest req, PsxDbContext db, HttpContext ctx)
         new(ClaimTypes.NameIdentifier, user.Id.ToString()),
         new(ClaimTypes.Name, user.Username),
     };
+    if (user.IsAdmin)
+        claims.Add(new Claim("IsAdmin", "true"));
     var identity = new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme);
     await ctx.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, new ClaimsPrincipal(identity));
 
-    return Results.Ok(new { id = user.Id, username = user.Username });
+    return Results.Ok(new { id = user.Id, username = user.Username, isAdmin = user.IsAdmin });
 });
 
 auth.MapPost("/logout", async (HttpContext ctx) =>
@@ -150,7 +160,7 @@ auth.MapPost("/logout", async (HttpContext ctx) =>
 }).RequireAuthorization();
 
 auth.MapGet("/me", (ClaimsPrincipal user) =>
-    Results.Ok(new { id = user.GetUserId(), username = user.Identity!.Name })
+    Results.Ok(new { id = user.GetUserId(), username = user.Identity!.Name, isAdmin = user.HasClaim("IsAdmin", "true") })
 ).RequireAuthorization();
 
 auth.MapPost("/change-password", async (ChangePasswordRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
@@ -223,7 +233,9 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
         if (entry.Type != TxType.Split && !req.SkipCashEntry)
         {
             var total = entry.Shares * entry.Price;
-            var cashAmount = entry.Type == TxType.Buy ? total + entry.Commission : total - entry.Commission - cgtAmount;
+            var cashAmount = entry.Type == TxType.Buy
+                ? total + entry.Commission + entry.NccplCharge
+                : total - entry.Commission - entry.NccplCharge - cgtAmount;
             // Amount must stay positive (CashCalculator assumes magnitude, sign comes from
             // Type) - skip in the pathological case where a sell's commission (+ CGT) alone
             // would wipe out or exceed the proceeds, rather than fabricate a zero/negative row.
@@ -248,6 +260,46 @@ ledger.MapPost("/", async (LedgerCreateRequest req, ClaimsPrincipal principal, P
     });
 
     return Results.Created($"/api/ledger/{entry.Id}", LedgerDto.From(entry));
+});
+
+// Narrow, deliberately scoped edit - only Commission/NccplCharge/Notes, never
+// Shares/Price/Type/Symbol/Date. Those drive holdings and negative-balance validation
+// (see HoldingsCalculator/CashCalculator), so changing them after the fact would need
+// the same batch-replay checks as a delete+re-add; charges alone never affect share
+// count, so they can be corrected in place with no revalidation beyond recomputing the
+// one linked cash amount below. Exists specifically so a real broker-charge correction
+// (e.g. backfilling the actual NCCPL clearing fee once known) doesn't require deleting
+// and recreating a trade, which would also lose its original CreatedAt ordering.
+ledger.MapPut("/{id:int}/charges", async (int id, LedgerChargesUpdateRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var entry = await db.LedgerEntries.FirstOrDefaultAsync(t => t.Id == id);
+    if (entry is null || entry.UserId != userId) return Results.NotFound();
+    if (entry.Type == TxType.Split)
+        return Results.BadRequest(new { error = "A split has no charges to edit." });
+    if (req.Commission < 0 || req.NccplCharge < 0)
+        return Results.BadRequest(new { error = "Charges cannot be negative." });
+    if ((req.Notes?.Length ?? 0) > 1000)
+        return Results.BadRequest(new { error = "Notes must be 1000 characters or fewer." });
+
+    entry.Commission = req.Commission;
+    entry.NccplCharge = req.NccplCharge;
+    entry.Notes = req.Notes;
+
+    var linkedCash = await db.CashEntries.FirstOrDefaultAsync(c => c.LedgerEntryId == id && c.UserId == userId);
+    if (linkedCash is not null)
+    {
+        var total = entry.Shares * entry.Price;
+        var cashAmount = entry.Type == TxType.Buy
+            ? total + entry.Commission + entry.NccplCharge
+            : total - entry.Commission - entry.NccplCharge - (linkedCash.CgtAmount ?? 0);
+        if (cashAmount <= 0)
+            return Results.BadRequest(new { error = "These charges would wipe out or exceed the trade's proceeds." });
+        linkedCash.Amount = cashAmount;
+    }
+
+    await db.SaveChangesAsync();
+    return Results.Ok(LedgerDto.From(entry));
 });
 
 ledger.MapDelete("/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbContext db) =>
@@ -409,6 +461,8 @@ settings.MapPut("/", async (SettingsDto dto, ClaimsPrincipal principal, PsxDbCon
         s.DividendTaxRatePct = dto.DividendTaxRatePct;
     if (dto.CgtRatePct >= 0 && dto.CgtRatePct <= 100)
         s.CgtRatePct = dto.CgtRatePct;
+    if (dto.NccplChargeRatePct >= 0 && dto.NccplChargeRatePct <= 100)
+        s.NccplChargeRatePct = dto.NccplChargeRatePct;
     s.OwnerName = string.IsNullOrWhiteSpace(dto.OwnerName) ? null : dto.OwnerName.Trim()[..Math.Min(dto.OwnerName.Trim().Length, 100)];
     await db.SaveChangesAsync();
     return Results.Ok(SettingsDto.From(s));
@@ -605,6 +659,35 @@ cash.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
     return Results.Ok(new { deleted = count });
 });
 
+// ── ADMIN ─────────────────────────────────────────────────────────────
+// No self-service email/token password reset in this app (small trusted user base, no
+// email sending set up) - instead the single seeded admin account (see AddIsAdmin
+// migration) can set a forgotten password directly. Deliberately narrow: this can only
+// ever touch PasswordHash, never any other user's ledger/cash/settings data.
+var admin = app.MapGroup("/api/admin").RequireAuthorization("Admin");
+
+admin.MapGet("/users", async (PsxDbContext db) =>
+{
+    var users = await db.Users
+        .OrderBy(u => u.Username)
+        .Select(u => new { u.Id, u.Username, u.CreatedAt })
+        .ToListAsync();
+    return Results.Ok(users);
+});
+
+admin.MapPost("/users/{id:int}/reset-password", async (int id, AdminResetPasswordRequest req, PsxDbContext db) =>
+{
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == id);
+    if (user is null) return Results.NotFound();
+
+    if (string.IsNullOrEmpty(req.NewPassword) || req.NewPassword.Length < 8 || req.NewPassword.Length > 128)
+        return Results.BadRequest(new { error = "New password must be 8-128 characters." });
+
+    user.PasswordHash = PasswordHasher.Hash(req.NewPassword);
+    await db.SaveChangesAsync();
+    return Results.Ok(new { username = user.Username });
+});
+
 app.Run();
 
 static bool IsValidUsername(string s) => Regex.IsMatch(s, @"^[A-Za-z0-9_\-]+$");
@@ -642,10 +725,10 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
         return false;
     }
 
-    // A Split is a marker, not a quantity/price event - Shares/Price/Commission are
-    // always forced to 0 regardless of what the client sends, and the ratio is
-    // validated in its own two fields instead.
-    decimal shares = 0, price = 0, commission = 0;
+    // A Split is a marker, not a quantity/price event - Shares/Price/Commission/
+    // NccplCharge are always forced to 0 regardless of what the client sends, and the
+    // ratio is validated in its own two fields instead.
+    decimal shares = 0, price = 0, commission = 0, nccplCharge = 0;
     decimal? splitRatioTo = null, splitRatioFrom = null;
 
     if (type == TxType.Split)
@@ -678,6 +761,7 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
         shares = req.Shares;
         price = req.Price;
         commission = req.Commission;
+        nccplCharge = req.NccplCharge;
     }
 
     entry = new LedgerEntry
@@ -689,6 +773,7 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
         Shares = shares,
         Price = price,
         Commission = commission,
+        NccplCharge = nccplCharge,
         TxDate = date,
         Notes = req.Notes,
         SplitRatioTo = splitRatioTo,
@@ -800,9 +885,11 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 
 record AuthRequest(string? Username, string? Password);
 record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
-record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false, decimal? SplitRatioTo = null, decimal? SplitRatioFrom = null, decimal CgtAmount = 0);
+record AdminResetPasswordRequest(string? NewPassword);
+record LedgerCreateRequest(string Type, string Symbol, string? Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, bool SkipCashEntry = false, decimal? SplitRatioTo = null, decimal? SplitRatioFrom = null, decimal CgtAmount = 0, decimal NccplCharge = 0);
 record ImportRequest(List<LedgerCreateRequest> Transactions);
-record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct, string? OwnerName, decimal CgtRatePct = 15m)
+record LedgerChargesUpdateRequest(decimal Commission, decimal NccplCharge, string? Notes);
+record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string, decimal> ManualPrices, decimal DividendTaxRatePct, string? OwnerName, decimal CgtRatePct = 15m, decimal NccplChargeRatePct = 0.007m)
 {
     public static SettingsDto From(UserSettings s) => new(
         s.CostMethod,
@@ -810,14 +897,15 @@ record SettingsDto(string CostMethod, bool IncludeCommission, Dictionary<string,
         JsonSerializer.Deserialize<Dictionary<string, decimal>>(s.ManualPricesJson) ?? new(),
         s.DividendTaxRatePct,
         s.OwnerName,
-        s.CgtRatePct
+        s.CgtRatePct,
+        s.NccplChargeRatePct
     );
 }
-record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, decimal? SplitRatioTo, decimal? SplitRatioFrom)
+record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shares, decimal Price, decimal Commission, string Date, string? Notes, decimal? SplitRatioTo, decimal? SplitRatioFrom, decimal NccplCharge)
 {
     public static LedgerDto From(LedgerEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Symbol, e.Sector, e.Shares, e.Price, e.Commission,
-        e.TxDate.ToString("yyyy-MM-dd"), e.Notes, e.SplitRatioTo, e.SplitRatioFrom
+        e.TxDate.ToString("yyyy-MM-dd"), e.Notes, e.SplitRatioTo, e.SplitRatioFrom, e.NccplCharge
     );
 }
 record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null, decimal? CdcHoldAmount = null);

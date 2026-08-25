@@ -778,6 +778,11 @@ a{color:var(--accent);text-decoration:none}
             <input type="number" id="piCommission" class="form-input mono" step="0.01">
           </div>
           <div class="form-group">
+            <label class="form-label">NCCPL Charge (PKR)</label>
+            <input type="number" id="piNccplCharge" class="form-input mono" step="0.01">
+            <span class="form-error" id="piNccplHint" style="color:var(--txt3)"></span>
+          </div>
+          <div class="form-group">
             <label class="form-label">Date</label>
             <input type="date" id="piDate" class="form-input">
           </div>
@@ -819,6 +824,7 @@ a{color:var(--accent);text-decoration:none}
           <th>Shares</th>
           <th>Price</th>
           <th>Commission</th>
+          <th>NCCPL</th>
           <th>Total Value</th>
           <th>Notes</th>
           <th>Action</th>
@@ -846,6 +852,27 @@ a{color:var(--accent);text-decoration:none}
     <input type="date" id="taxReportTo" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderTaxReport()">
     <span id="taxReportTotal" class="method-pill"></span>
   </div>
+  <div class="txlog-filters" style="align-items:center">
+    <span style="font-size:11px;color:var(--txt3)">View period:</span>
+    <input type="date" id="cashFilterFrom" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderCashLedger()">
+    <span style="font-size:11px;color:var(--txt3)">to</span>
+    <input type="date" id="cashFilterTo" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderCashLedger()">
+    <button class="btn btn-sm" onclick="clearCashDateFilter()">Clear</button>
+  </div>
+  <div class="rpnl-summary" id="cashLedgerSummary">
+    <div class="rpnl-item">
+      <div class="rpnl-lbl">Opening Balance</div>
+      <div class="rpnl-val" id="cashOpeningBalance">—</div>
+    </div>
+    <div class="rpnl-item">
+      <div class="rpnl-lbl">Period Total</div>
+      <div class="rpnl-val" id="cashPeriodTotal">—</div>
+    </div>
+    <div class="rpnl-item">
+      <div class="rpnl-lbl">Closing Balance</div>
+      <div class="rpnl-val" id="cashClosingBalance">—</div>
+    </div>
+  </div>
   <div class="tbl-wrap">
     <table class="tbl">
       <thead>
@@ -854,6 +881,7 @@ a{color:var(--accent);text-decoration:none}
           <th style="text-align:left">Type</th>
           <th style="text-align:left">Script</th>
           <th>Amount</th>
+          <th>Balance</th>
           <th style="text-align:left">Notes</th>
           <th>Action</th>
         </tr>
@@ -949,6 +977,45 @@ a{color:var(--accent);text-decoration:none}
   </div>
 </div>
 
+<!-- ── EDIT CHARGES MODAL ─────────────────────────────────────── -->
+<!-- Deliberately narrow: only Commission/NCCPL/Notes are editable here, never
+     Shares/Price/Type/Symbol/Date - those drive holdings math and would need the same
+     negative-balance replay checks a delete+re-add gets (see PUT /api/ledger/{id}/charges). -->
+<div class="modal-backdrop" id="editChargesBackdrop" onclick="if(event.target===this) closeEditChargesModal()">
+  <div class="modal">
+    <div class="modal-hd">
+      <div class="modal-title">Edit Commission / NCCPL Charge</div>
+      <button class="btn btn-icon btn-sm" onclick="closeEditChargesModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="ecSummary" style="font-size:12px;color:var(--txt3);margin-bottom:12px"></div>
+      <div class="form-grid">
+        <div class="form-group">
+          <label class="form-label">Commission (PKR)</label>
+          <input type="number" id="ecCommission" class="form-input mono" placeholder="0.00" min="0" step="0.01" oninput="updateEditChargesPreview()">
+        </div>
+        <div class="form-group">
+          <label class="form-label">NCCPL Charge (PKR)</label>
+          <input type="number" id="ecNccplCharge" class="form-input mono" placeholder="0.00" min="0" step="0.01" oninput="updateEditChargesPreview()">
+        </div>
+        <div class="form-group full">
+          <label class="form-label">Notes (optional)</label>
+          <input type="text" id="ecNotes" class="form-input">
+        </div>
+        <div class="form-group full" id="ecPreviewGroup">
+          <div style="background:var(--elevated);border:1px solid var(--border);border-radius:var(--r);padding:8px 12px;font-size:12px;color:var(--txt2)">
+            New cash amount: <span id="ecCashPreview" class="mono" style="font-weight:700;color:var(--txt)">—</span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" onclick="closeEditChargesModal()">Cancel</button>
+      <button class="btn btn-primary" onclick="submitEditCharges()">Save Charges</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── SYMBOL DETAIL MODAL ────────────────────────────────────── -->
 <div class="modal-backdrop" id="symbolDetailBackdrop" onclick="if(event.target===this) closeSymbolDetailModal()">
   <div class="modal">
@@ -1021,17 +1088,22 @@ a{color:var(--accent);text-decoration:none}
         </div>
         <div class="form-group">
           <label class="form-label" id="lblShares">Shares</label>
-          <input type="number" id="fShares" class="form-input mono" placeholder="0" min="0.01" step="0.01" oninput="updateCgtPreview()">
+          <input type="number" id="fShares" class="form-input mono" placeholder="0" min="0.01" step="0.01" oninput="updateCgtPreview(); updateNccplPreview()">
           <span class="form-error" id="errShares"></span>
         </div>
         <div class="form-group">
           <label class="form-label" id="lblPrice">Price Per Share (PKR)</label>
-          <input type="number" id="fPrice" class="form-input mono" placeholder="0.00" min="0.01" step="0.01" oninput="updateCgtPreview()">
+          <input type="number" id="fPrice" class="form-input mono" placeholder="0.00" min="0.01" step="0.01" oninput="updateCgtPreview(); updateNccplPreview()">
           <span class="form-error" id="errPrice"></span>
         </div>
         <div class="form-group" id="commissionGroup">
           <label class="form-label">Commission (PKR)</label>
           <input type="number" id="fCommission" class="form-input mono" placeholder="0.00" min="0" step="0.01" value="0">
+        </div>
+        <div class="form-group" id="nccplGroup">
+          <label class="form-label">NCCPL Charge (PKR)</label>
+          <input type="number" id="fNccplCharge" class="form-input mono" placeholder="0.00" min="0" step="0.01" value="0">
+          <span class="form-error" id="nccplHint" style="color:var(--txt3)"></span>
         </div>
         <div class="form-group" id="cgtGroup" style="display:none">
           <label class="form-label">Capital Gains Tax (PKR)</label>
@@ -1146,6 +1218,21 @@ a{color:var(--accent);text-decoration:none}
     </div>
 
     <div class="settings-section">
+      <div class="settings-label">NCCPL Charge</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
+        NCCPL's per-trade clearing/settlement charge, as a % of trade value — this never
+        appears on your broker's own trade-confirmation memo, only on CDC's ledger, so it
+        has to be entered here. Pre-fills the suggested amount on a new Buy/Sell and a PDF
+        import — each trade keeps the amount that applied to it, so changing this doesn't
+        rewrite past entries. Check a recent CDC customer ledger for your actual rate.
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="number" id="settingsNccplRate" class="form-input mono" style="max-width:100px" min="0" max="100" step="0.0001" onchange="setNccplChargeRate(this.value)">
+        <span style="font-size:13px;color:var(--txt2)">%</span>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <div class="settings-label">Manual Price Overrides</div>
       <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">Enter prices manually when live fetch fails</div>
       <div class="manual-price-list" id="manualPriceList"></div>
@@ -1161,6 +1248,16 @@ a{color:var(--accent);text-decoration:none}
           🗑 Clear All Data
         </button>
       </div>
+    </div>
+
+    <div class="settings-section" id="adminSection" style="display:none">
+      <div class="settings-label">Admin — Reset a User's Password</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
+        For when someone forgets their password — there's no email-based reset in this
+        app, so as the admin account you can set a new one directly. This only ever
+        touches the chosen account's password, nothing else about it.
+      </div>
+      <div id="adminUserList" style="display:flex;flex-direction:column;gap:6px"></div>
     </div>
 
   </div>
@@ -1286,6 +1383,19 @@ const ANALYST_SIGNALS = {
   },
 };
 
+// chargesFor(tx): whether to fold this transaction's Commission + NCCPL charge into
+// cost basis / proceeds, per the "Include Commission in Cost" setting - both are
+// per-trade broker/regulator charges, so they're gated together rather than adding a
+// second toggle. (2026-08-24: tried forcing Commission alone on for trades >=
+// 2026-08-17 on the theory the broker's own avg cost includes it - checked against the
+// broker app's actual per-symbol avg cost and it does NOT; every symbol matches the
+// plain price-weighted average to within ~0.01/share, and is off by 10-20x more with
+// commission folded in. Reverted - do not reintroduce without new evidence the broker's
+// figure actually includes either charge.)
+function chargesFor(tx) {
+  return state.settings.includeCommission ? (tx.commission + (tx.nccplCharge || 0)) : 0;
+}
+
 /* ══════════════════════════════════════════════════════
    STATE
 ══════════════════════════════════════════════════════ */
@@ -1296,12 +1406,33 @@ let state = {
     includeCommission: false,
     manualPrices: {},
     dividendTaxRatePct: 15,
-    cgtRatePct: 15
+    cgtRatePct: 15,
+    nccplChargeRatePct: 0.007
   },
   prices: {},
   cash: { balance: 0, entries: [] },
-  index: null // { value, change, changePct } for KSE100, or null until first fetched
+  index: null, // { value, change, changePct } for KSE100, or null until first fetched
+  // Per-table "show all" toggles (Transaction History / Realized P&L / Cash Ledger) -
+  // in-memory only, not persisted or synced from the server, resets on reload.
+  ui: { showAllTx: false, showAllRealized: false, showAllCash: false }
 };
+
+// Long tables (Transaction History, Realized P&L, Cash Ledger) default to the most
+// recent ROW_LIMIT rows with a "Show all" toggle, rather than dumping the full history.
+const ROW_LIMIT = 10;
+function showAllRowHtml(totalCount, showAll, toggleKey, colspan) {
+  if (totalCount <= ROW_LIMIT) return '';
+  const label = showAll ? 'Show less' : `Show all (${totalCount})`;
+  return `<tr><td colspan="${colspan}" style="text-align:center;padding:10px">
+    <button class="btn btn-sm" onclick="toggleShowAll('${toggleKey}')">${label}</button>
+  </td></tr>`;
+}
+function toggleShowAll(key) {
+  state.ui[key] = !state.ui[key];
+  if (key === 'showAllTx') renderTransactionLog();
+  else if (key === 'showAllRealized') renderRealizedPL();
+  else if (key === 'showAllCash') renderCashLedger();
+}
 
 let chartInstances = {};
 
@@ -1334,6 +1465,7 @@ async function loadState() {
       shares: parseFloat(t.shares),
       price: parseFloat(t.price),
       commission: parseFloat(t.commission),
+      nccplCharge: parseFloat(t.nccplCharge) || 0,
       splitRatioTo: t.splitRatioTo != null ? parseFloat(t.splitRatioTo) : null,
       splitRatioFrom: t.splitRatioFrom != null ? parseFloat(t.splitRatioFrom) : null
     }));
@@ -1392,7 +1524,7 @@ function computeHoldingsWA() {
       continue;
     }
 
-    const comm = state.settings.includeCommission ? tx.commission : 0;
+    const comm = chargesFor(tx);
 
     if (tx.type === 'buy') {
       if (!holdings[sym]) {
@@ -1403,7 +1535,7 @@ function computeHoldingsWA() {
     } else {
       if (holdings[sym] && holdings[sym].shares > 0) {
         const avgCost = holdings[sym].totalCost / holdings[sym].shares;
-        const sellComm = state.settings.includeCommission ? tx.commission : 0;
+        const sellComm = chargesFor(tx);
         holdings[sym].totalCost = Math.max(0, holdings[sym].totalCost - avgCost * tx.shares);
         holdings[sym].shares -= tx.shares;
         if (holdings[sym].shares <= 1e-9) {
@@ -1441,7 +1573,7 @@ function computeHoldingsFIFO() {
       continue;
     }
 
-    const comm = state.settings.includeCommission ? tx.commission : 0;
+    const comm = chargesFor(tx);
 
     if (tx.type === 'buy') {
       if (!lots[sym]) lots[sym] = [];
@@ -1687,7 +1819,7 @@ function computeRealizedPL() {
         continue;
       }
 
-      const comm = state.settings.includeCommission ? tx.commission : 0;
+      const comm = chargesFor(tx);
 
       if (tx.type === 'buy') {
         if (!lots[sym]) lots[sym] = [];
@@ -1697,7 +1829,7 @@ function computeRealizedPL() {
         if (!lots[sym]) continue;
         if (!bySymbol[sym]) bySymbol[sym] = { realized:0, symbol:sym };
         let remaining = tx.shares;
-        const sellComm = state.settings.includeCommission ? tx.commission : 0;
+        const sellComm = chargesFor(tx);
         const grossProceeds = tx.shares * tx.price - sellComm;
         let costBasis = 0;
 
@@ -1729,7 +1861,7 @@ function computeRealizedPL() {
         continue;
       }
 
-      const comm = state.settings.includeCommission ? tx.commission : 0;
+      const comm = chargesFor(tx);
 
       if (tx.type === 'buy') {
         if (!runningAvg[sym]) runningAvg[sym] = { shares:0, totalCost:0 };
@@ -1740,7 +1872,7 @@ function computeRealizedPL() {
         if (!bySymbol[sym]) bySymbol[sym] = { realized:0, symbol:sym };
 
         const avgCost = runningAvg[sym].totalCost / runningAvg[sym].shares;
-        const sellComm = state.settings.includeCommission ? tx.commission : 0;
+        const sellComm = chargesFor(tx);
         const proceeds = tx.shares * tx.price - sellComm;
         const cost = tx.shares * avgCost;
         const realized = proceeds - cost;
@@ -3192,7 +3324,7 @@ function renderCharts() {
       for (const dt of dates) {
         while (txIdx < sorted.length && sorted[txIdx].date <= dt) {
           const tx = sorted[txIdx];
-          const comm = state.settings.includeCommission ? tx.commission : 0;
+          const comm = chargesFor(tx);
           const sym  = tx.symbol;
           if (tx.type === 'buy') {
             if (!runningHoldings[sym]) runningHoldings[sym] = { shares:0, totalCost:0 };
@@ -3371,16 +3503,28 @@ function renderRealizedPL() {
   if (!el) return;
 
   const sells = state.transactions.filter(t => t.type === 'sell');
+  // bySymbol only ever has an entry for a symbol once it's been SOLD - a dividend from a
+  // still-held symbol (the common case) would otherwise vanish from both the total and
+  // the table below just because that script hasn't been sold yet. Union in every symbol
+  // that has a dividend entry, even with zero realized P&L, so its dividends still count.
+  const dividendSymbols = new Set(
+    state.cash.entries.filter(c => c.type === 'dividend').map(c => c.symbol)
+  );
+  const allSymbols = new Set([...Object.keys(bySymbol), ...dividendSymbols]);
 
-  if (sells.length === 0) {
+  if (allSymbols.size === 0) {
     el.innerHTML = `<div class="empty-state" style="padding:24px">
-      <div style="color:var(--txt3);font-size:13px">No sell transactions yet</div>
+      <div style="color:var(--txt3);font-size:13px">No sell transactions or dividends yet</div>
     </div>`;
     return;
   }
 
-  const rows = Object.values(bySymbol).sort((a,b) => b.realized - a.realized);
+  const rows = [...allSymbols]
+    .map(sym => bySymbol[sym] || { realized: 0, symbol: sym, noRealizedEvent: true })
+    .sort((a,b) => b.realized - a.realized);
   const totalDividends = rows.reduce((sum, r) => sum + getSymbolDividendTotal(r.symbol), 0);
+  const showAll = state.ui.showAllRealized;
+  const displayedRows = showAll ? rows : rows.slice(0, ROW_LIMIT);
 
   el.innerHTML = `
     <div class="rpnl-summary">
@@ -3394,7 +3538,7 @@ function renderRealizedPL() {
       </div>
       <div class="rpnl-item">
         <div class="rpnl-lbl">Closed Positions</div>
-        <div class="rpnl-val">${rows.length}</div>
+        <div class="rpnl-val">${Object.keys(bySymbol).length}</div>
       </div>
     </div>
     <div class="tbl-wrap">
@@ -3408,15 +3552,15 @@ function renderRealizedPL() {
           </tr>
         </thead>
         <tbody>
-          ${rows.map(r => {
+          ${displayedRows.map(r => {
             const div = getSymbolDividendTotal(r.symbol);
             return `<tr>
             <td style="text-align:left"><span class="sym">${escapeHtml(r.symbol)}</span></td>
-            <td class="${r.realized >= 0 ? 'val-pos':'val-neg'}">${fPKR(r.realized, true)}</td>
+            <td class="${r.noRealizedEvent ? 'val-neu' : (r.realized >= 0 ? 'val-pos':'val-neg')}">${r.noRealizedEvent ? '—' : fPKR(r.realized, true)}</td>
             <td class="${div > 0 ? 'val-pos' : 'val-neu'}">${div > 0 ? fPKR(div) : '—'}</td>
             <td style="text-align:center"><button class="btn btn-sm" onclick="openSymbolDetailModal('${escapeForJsAttr(r.symbol)}')">Details</button></td>
           </tr>`;
-          }).join('')}
+          }).join('') + showAllRowHtml(rows.length, showAll, 'showAllRealized', 4)}
         </tbody>
       </table>
     </div>`;
@@ -3477,17 +3621,21 @@ function renderTransactionLog() {
 
   const tbody = document.getElementById('txTbody');
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10"><div class="no-data">No transactions found</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="11"><div class="no-data">No transactions found</div></td></tr>`;
     return;
   }
 
-  tbody.innerHTML = filtered.map(tx => {
+  const showAll = state.ui.showAllTx;
+  const displayed = showAll ? filtered : filtered.slice(0, ROW_LIMIT);
+
+  tbody.innerHTML = displayed.map(tx => {
     if (tx.kind === 'dividend') {
       return `<tr>
         <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
         <td style="text-align:left"><span class="tx-type dividend">DIVIDEND</span></td>
         <td style="text-align:left"><span class="sym">${escapeHtml(tx.symbol)}</span></td>
         <td style="text-align:left"><span class="sector-tag">—</span></td>
+        <td>—</td>
         <td>—</td>
         <td>—</td>
         <td>—</td>
@@ -3507,6 +3655,7 @@ function renderTransactionLog() {
         <td>${fNum(tx.splitRatioTo)}:${fNum(tx.splitRatioFrom)}</td>
         <td>—</td>
         <td>—</td>
+        <td>—</td>
         <td class="val-neu">—</td>
         <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(tx.notes)||'—'}</td>
         <td style="text-align:center">
@@ -3523,13 +3672,15 @@ function renderTransactionLog() {
       <td>${fNum(tx.shares)}</td>
       <td>${fPKR(tx.price)}</td>
       <td>${fPKR(tx.commission)}</td>
+      <td>${fPKR(tx.nccplCharge)}</td>
       <td class="${tx.type==='sell'?'val-pos':'val-neg'}">${tx.type==='sell'?'+':'-'}${fPKR(total)}</td>
       <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(tx.notes)||'—'}</td>
-      <td style="text-align:center">
+      <td style="text-align:center;white-space:nowrap">
+        <button class="btn btn-sm" title="Edit Commission / NCCPL Charge" onclick="openEditChargesModal('${tx.id}')">✎</button>
         <button class="btn btn-sm btn-danger" onclick="deleteTransaction('${tx.id}')">✕</button>
       </td>
     </tr>`;
-  }).join('');
+  }).join('') + showAllRowHtml(filtered.length, showAll, 'showAllTx', 11);
 }
 
 /* ══════════════════════════════════════════════════════
@@ -3660,17 +3811,71 @@ function renderSymbolDetailModal(symbol) {
     </div>`;
 }
 
+// Stamps every cash entry with its running balance, walked oldest-to-newest (tie-broken
+// by id, since same-date entries still have a real creation order) — mirrors the
+// server's CashCalculator.Balance semantics (Withdrawal subtracts, everything else adds),
+// just incrementally instead of as one flat sum. Always computed over the FULL history,
+// never a filtered/displayed subset, so a date-range view's opening balance is still the
+// true balance carried in from before that range, not a rebase to zero.
+function computeCashRunningBalances() {
+  const chronological = [...state.cash.entries].sort((a,b) =>
+    new Date(a.date) - new Date(b.date) || a.id - b.id
+  );
+  let running = 0;
+  return chronological.map(c => {
+    running += c.type === 'withdrawal' ? -c.amount : c.amount;
+    return { ...c, runningBalance: running };
+  });
+}
+
+function clearCashDateFilter() {
+  document.getElementById('cashFilterFrom').value = '';
+  document.getElementById('cashFilterTo').value = '';
+  renderCashLedger();
+}
+
 function renderCashLedger() {
   document.getElementById('cashCount').textContent = state.cash.entries.length;
 
   const tbody = document.getElementById('cashTbody');
+  const summaryEl = document.getElementById('cashLedgerSummary');
   if (state.cash.entries.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="6"><div class="no-data">No cash entries yet — add a deposit to get started</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7"><div class="no-data">No cash entries yet — add a deposit to get started</div></td></tr>`;
+    if (summaryEl) summaryEl.style.display = 'none';
+    return;
+  }
+  if (summaryEl) summaryEl.style.display = '';
+
+  const fromVal = document.getElementById('cashFilterFrom')?.value || '';
+  const toVal   = document.getElementById('cashFilterTo')?.value || '';
+
+  const withBalances = computeCashRunningBalances(); // chronological, full history
+  const inPeriod = withBalances.filter(c => (!fromVal || c.date >= fromVal) && (!toVal || c.date <= toVal));
+
+  // Opening balance = whatever was carried in from before the period - the running
+  // balance of the last entry strictly before `fromVal`, or 0 if there's no "from" filter
+  // (viewing from the very start) or nothing preceded it.
+  const beforePeriod = fromVal ? withBalances.filter(c => c.date < fromVal) : [];
+  const openingBalance = beforePeriod.length ? beforePeriod[beforePeriod.length - 1].runningBalance : 0;
+  const closingBalance = inPeriod.length ? inPeriod[inPeriod.length - 1].runningBalance : openingBalance;
+  const periodTotal = closingBalance - openingBalance;
+
+  document.getElementById('cashOpeningBalance').textContent = fPKR(openingBalance);
+  document.getElementById('cashClosingBalance').textContent = fPKR(closingBalance);
+  const totalEl = document.getElementById('cashPeriodTotal');
+  totalEl.textContent = fPKR(periodTotal, true);
+  totalEl.className = `rpnl-val ${periodTotal >= 0 ? 'val-pos' : 'val-neg'}`;
+
+  if (inPeriod.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7"><div class="no-data">No entries in this date range</div></td></tr>`;
     return;
   }
 
-  const sorted = [...state.cash.entries].sort((a,b) => new Date(b.date) - new Date(a.date));
-  tbody.innerHTML = sorted.map(c => {
+  const newestFirst = [...inPeriod].sort((a,b) => new Date(b.date) - new Date(a.date) || b.id - a.id);
+  const showAll = state.ui.showAllCash;
+  const displayed = showAll ? newestFirst : newestFirst.slice(0, ROW_LIMIT);
+
+  tbody.innerHTML = displayed.map(c => {
     const taxSubtext = (c.type === 'dividend' && c.grossAmount != null)
       ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Gross ${fPKR(c.grossAmount)} − Tax ${fPKR(c.grossAmount - c.amount)} (${fPct(c.taxRatePct||0)})</span>`
       : (c.type === 'deposit' && c.cdcHoldAmount != null && c.cdcHoldAmount > 0)
@@ -3690,12 +3895,13 @@ function renderCashLedger() {
     <td style="text-align:left"><span class="tx-type ${c.type}">${typeLabel}</span></td>
     <td style="text-align:left"><span class="sym">${escapeHtml(c.symbol)||'—'}</span></td>
     <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${fPKR(c.amount)}${taxSubtext}</td>
+    <td style="font-family:var(--mono)">${fPKR(c.runningBalance)}</td>
     <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(c.notes)||'—'}</td>
     <td style="text-align:center">
       <button class="btn btn-sm btn-danger" onclick="deleteCashEntry('${c.id}')">✕</button>
     </td>
   </tr>`;
-  }).join('');
+  }).join('') + showAllRowHtml(newestFirst.length, showAll, 'showAllCash', 7);
 }
 
 /* ══════════════════════════════════════════════════════
@@ -3790,6 +3996,7 @@ async function addTransaction(data) {
     shares: parseFloat(data.shares),
     price:  parseFloat(data.price),
     commission: parseFloat(data.commission) || 0,
+    nccplCharge: parseFloat(data.nccplCharge) || 0,
     date: data.date,
     notes: data.notes || '',
     skipCashEntry: !!data.skipCashEntry,
@@ -3822,6 +4029,7 @@ async function addTransaction(data) {
     tx.shares = parseFloat(tx.shares);
     tx.price = parseFloat(tx.price);
     tx.commission = parseFloat(tx.commission);
+    tx.nccplCharge = parseFloat(tx.nccplCharge);
     state.transactions.push(tx);
 
     // A regular buy/sell auto-debits/credits free cash server-side - refresh our copy
@@ -3830,7 +4038,9 @@ async function addTransaction(data) {
     if (!payload.skipCashEntry) {
       await reloadCash();
       const total = tx.shares * tx.price;
-      const cashAmount = tx.type === 'buy' ? total + tx.commission : total - tx.commission - payload.cgtAmount;
+      const cashAmount = tx.type === 'buy'
+        ? total + tx.commission + tx.nccplCharge
+        : total - tx.commission - tx.nccplCharge - payload.cgtAmount;
       const cashNote = cashAmount > 0
         ? (tx.type === 'buy' ? ` — PKR ${fPKR(cashAmount)} deducted from free cash` : ` — PKR ${fPKR(cashAmount)} credited to free cash`)
         : '';
@@ -3934,6 +4144,16 @@ function renderPdfImportStep() {
   document.getElementById('piDate').value = c.date;
   document.getElementById('piNotes').value = c.notes || '';
 
+  // The broker's own trade-confirmation memo never lists NCCPL's clearing charge (only
+  // Brokerage + SST feed into c.commission above) - suggest it from the Settings rate
+  // instead, same "editable starting value" contract as Add Transaction's own suggestion.
+  const rate = state.settings.nccplChargeRatePct || 0;
+  const suggestedNccpl = c.shares * c.price * (rate / 100);
+  document.getElementById('piNccplCharge').value = suggestedNccpl.toFixed(2);
+  document.getElementById('piNccplHint').textContent = rate > 0
+    ? `Suggested at ${rate}% — not on the memo, verify against your CDC ledger`
+    : 'Set a rate in Settings to auto-suggest this';
+
   document.getElementById('piPrevBtn').disabled = pdfImportIndex === 0;
 
   if (c.matchConfidence === 'none') document.getElementById('piSymbol').focus();
@@ -3976,6 +4196,7 @@ async function pdfImportConfirm() {
   const shares = parseFloat(document.getElementById('piShares').value);
   const price = parseFloat(document.getElementById('piPrice').value);
   const commission = parseFloat(document.getElementById('piCommission').value) || 0;
+  const nccplCharge = parseFloat(document.getElementById('piNccplCharge').value) || 0;
   const date = document.getElementById('piDate').value;
   const notes = document.getElementById('piNotes').value;
   const type = pdfImportCandidates[pdfImportIndex].type;
@@ -3989,7 +4210,7 @@ async function pdfImportConfirm() {
     return;
   }
 
-  const ok = await addTransaction({ type, symbol, sector, shares, price, commission, date, notes });
+  const ok = await addTransaction({ type, symbol, sector, shares, price, commission, nccplCharge, date, notes });
   if (!ok) return; // addTransaction already toasted the error - stay on this row
 
   pdfImportActedOn.add(pdfImportIndex);
@@ -4031,6 +4252,7 @@ async function addSplit(data) {
     tx.shares = parseFloat(tx.shares);
     tx.price = parseFloat(tx.price);
     tx.commission = parseFloat(tx.commission);
+    tx.nccplCharge = parseFloat(tx.nccplCharge) || 0;
     tx.splitRatioTo = tx.splitRatioTo != null ? parseFloat(tx.splitRatioTo) : null;
     tx.splitRatioFrom = tx.splitRatioFrom != null ? parseFloat(tx.splitRatioFrom) : null;
     state.transactions.push(tx);
@@ -4072,6 +4294,82 @@ async function deleteTransaction(id) {
     toast('Transaction removed', 'info');
   } catch(e) {
     toast('Network error — could not delete transaction', 'error');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   EDIT COMMISSION / NCCPL CHARGE ON AN EXISTING TRANSACTION
+   Narrow, deliberate scope - only these two charges (+ notes), never shares/price/type,
+   which would need the full negative-balance replay a delete+re-add already gets. See
+   PUT /api/ledger/{id}/charges on the backend.
+══════════════════════════════════════════════════════ */
+let editChargesTxId = null;
+
+function openEditChargesModal(id) {
+  id = Number(id);
+  const tx = state.transactions.find(t => t.id === id);
+  if (!tx || tx.type === 'split') return;
+
+  editChargesTxId = id;
+  document.getElementById('ecSummary').textContent =
+    `${tx.type.toUpperCase()} ${fNum(tx.shares)} × ${tx.symbol} @ ${fPKR(tx.price)} on ${tx.date}`;
+  document.getElementById('ecCommission').value = tx.commission.toFixed(2);
+  document.getElementById('ecNccplCharge').value = tx.nccplCharge.toFixed(2);
+  document.getElementById('ecNotes').value = tx.notes || '';
+  updateEditChargesPreview();
+  document.getElementById('editChargesBackdrop').classList.add('open');
+}
+
+function closeEditChargesModal() {
+  document.getElementById('editChargesBackdrop').classList.remove('open');
+  editChargesTxId = null;
+}
+
+// Live preview only - the server recomputes and stores the authoritative cash amount
+// (it also knows the linked CashEntry's CgtAmount, which this preview can't see).
+function updateEditChargesPreview() {
+  const tx = state.transactions.find(t => t.id === editChargesTxId);
+  const el = document.getElementById('ecCashPreview');
+  if (!tx || !el) return;
+  const comm = parseFloat(document.getElementById('ecCommission').value) || 0;
+  const nccpl = parseFloat(document.getElementById('ecNccplCharge').value) || 0;
+  const total = tx.shares * tx.price;
+  const cashAmount = tx.type === 'buy' ? total + comm + nccpl : total - comm - nccpl;
+  el.textContent = `PKR ${fPKR(cashAmount)}${tx.type === 'sell' ? ' (before any CGT withheld)' : ''}`;
+}
+
+async function submitEditCharges() {
+  const id = editChargesTxId;
+  if (!id) return;
+  const commission = parseFloat(document.getElementById('ecCommission').value) || 0;
+  const nccplCharge = parseFloat(document.getElementById('ecNccplCharge').value) || 0;
+  const notes = document.getElementById('ecNotes').value;
+
+  try {
+    const res = await fetch(`/api/ledger/${id}/charges`, {
+      method: 'PUT',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ commission, nccplCharge, notes })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not update charges', 'error');
+      return;
+    }
+    const updated = await res.json();
+    const tx = state.transactions.find(t => t.id === id);
+    if (tx) {
+      tx.commission = parseFloat(updated.commission);
+      tx.nccplCharge = parseFloat(updated.nccplCharge);
+      tx.notes = updated.notes;
+    }
+    await reloadCash();
+    closeEditChargesModal();
+    renderAll();
+    toast('Charges updated', 'success');
+  } catch(e) {
+    toast('Network error — could not update charges', 'error');
   }
 }
 
@@ -4332,8 +4630,12 @@ function setOpeningModeUI(isOpening) {
   document.getElementById('lblPrice').textContent = isOpening ? 'Avg Cost Price (PKR)' : 'Price Per Share (PKR)';
   document.getElementById('txTypeGroup').style.display = isOpening ? 'none' : '';
   document.getElementById('commissionGroup').style.display = isOpening ? 'none' : '';
+  document.getElementById('nccplGroup').style.display = isOpening ? 'none' : '';
   document.getElementById('openingHint').style.display = isOpening ? '' : 'none';
-  if (isOpening) document.getElementById('fCommission').value = '0';
+  if (isOpening) {
+    document.getElementById('fCommission').value = '0';
+    document.getElementById('fNccplCharge').value = '0';
+  }
 }
 
 // For recording a stock split (e.g. MTL 2:1): adds a marker transaction so future
@@ -4352,8 +4654,12 @@ function setSplitModeUI(isSplit) {
   document.getElementById('lblPrice').textContent = isSplit ? 'Old Shares (per split)' : (openingMode ? 'Avg Cost Price (PKR)' : 'Price Per Share (PKR)');
   document.getElementById('txTypeGroup').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
   document.getElementById('commissionGroup').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
+  document.getElementById('nccplGroup').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
   document.getElementById('splitHint').style.display = isSplit ? '' : 'none';
-  if (isSplit) document.getElementById('fCommission').value = '0';
+  if (isSplit) {
+    document.getElementById('fCommission').value = '0';
+    document.getElementById('fNccplCharge').value = '0';
+  }
 }
 
 function closeModal() {
@@ -4383,6 +4689,7 @@ function updateSellAvailable() {
     div.style.display = 'none';
   }
   updateCgtPreview();
+  updateNccplPreview();
 }
 
 // Suggests CGT for a Sell using the CURRENT (pre-this-sale) avg cost for the symbol -
@@ -4419,6 +4726,32 @@ function updateCgtPreview() {
     : `No gain vs avg cost PKR ${fPKR(holding.avgCost)} — CGT normally 0`;
 }
 
+// Suggests the NCCPL clearing charge for a Buy or Sell from trade value × the rate in
+// Settings - CDC's own ledger is the only place this ever shows up (never a broker's
+// trade-confirmation memo), so there's no parsed source to pull from; this is a
+// starting value only, same "editable, verify against your own ledger" contract as the
+// CGT suggestion above.
+function updateNccplPreview() {
+  const group = document.getElementById('nccplGroup');
+  const hint = document.getElementById('nccplHint');
+  if (!group) return;
+
+  const shares = parseFloat(document.getElementById('fShares')?.value);
+  const price = parseFloat(document.getElementById('fPrice')?.value);
+  const rate = state.settings.nccplChargeRatePct || 0;
+
+  if (!shares || !price) {
+    hint.textContent = rate > 0 ? 'Enter shares and price for an NCCPL suggestion' : '';
+    return;
+  }
+
+  const suggested = shares * price * (rate / 100);
+  document.getElementById('fNccplCharge').value = suggested.toFixed(2);
+  hint.textContent = rate > 0
+    ? `${fPKR(shares * price)} × ${rate}% — verify against your CDC ledger`
+    : 'Set a rate in Settings to auto-suggest this';
+}
+
 function clearForm() {
   setTxType('buy');
   ['fSymbol','fSector','fShares','fPrice','fNotes'].forEach(id => {
@@ -4426,6 +4759,7 @@ function clearForm() {
     if (el) el.value = '';
   });
   document.getElementById('fCommission').value = '0';
+  document.getElementById('fNccplCharge').value = '0';
   document.getElementById('fCgtAmount').value = '0';
   document.getElementById('fDate').value = new Date().toISOString().split('T')[0];
   ['errSymbol','errSector','errShares','errPrice','errDate'].forEach(id => {
@@ -4452,6 +4786,7 @@ async function submitTransaction() {
   const shares  = parseFloat(document.getElementById('fShares').value);
   const price   = parseFloat(document.getElementById('fPrice').value);
   const comm    = parseFloat(document.getElementById('fCommission').value) || 0;
+  const nccplCharge = parseFloat(document.getElementById('fNccplCharge').value) || 0;
   const cgtAmount = type === 'sell' ? (parseFloat(document.getElementById('fCgtAmount').value) || 0) : 0;
   const date    = document.getElementById('fDate').value;
   const notes   = document.getElementById('fNotes').value;
@@ -4478,7 +4813,7 @@ async function submitTransaction() {
   }
   if (!valid) return;
 
-  const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, date, notes, skipCashEntry: openingMode, cgtAmount });
+  const ok = await addTransaction({ type, symbol, sector, shares, price, commission: comm, nccplCharge, date, notes, skipCashEntry: openingMode, cgtAmount });
   if (ok) closeModal();
 }
 
@@ -4538,7 +4873,10 @@ document.addEventListener('DOMContentLoaded', () => {
 /* ══════════════════════════════════════════════════════
    SETTINGS
 ══════════════════════════════════════════════════════ */
-function openSettings()  { document.getElementById('settingsPanel').classList.add('open'); }
+function openSettings()  {
+  document.getElementById('settingsPanel').classList.add('open');
+  if (currentIsAdmin) renderAdminSection();
+}
 function closeSettings() { document.getElementById('settingsPanel').classList.remove('open'); }
 
 function cloneSettings() {
@@ -4607,6 +4945,19 @@ function setCgtRate(value) {
   toast(`Default CGT rate set to ${rate}%`, 'info');
 }
 
+function setNccplChargeRate(value) {
+  const rate = parseFloat(value);
+  if (isNaN(rate) || rate < 0 || rate > 100) {
+    toast('Charge rate must be between 0 and 100', 'error');
+    renderSettingsUI();
+    return;
+  }
+  const prev = cloneSettings();
+  state.settings.nccplChargeRatePct = rate;
+  pushSettings(prev);
+  toast(`Default NCCPL charge rate set to ${rate}%`, 'info');
+}
+
 function setOwnerName(value) {
   const prev = cloneSettings();
   state.settings.ownerName = value.trim() || null;
@@ -4665,6 +5016,9 @@ function updateHeaderOwnerName() {
 function renderSettingsUI() {
   const { costMethod, includeCommission } = state.settings;
 
+  const adminSection = document.getElementById('adminSection');
+  if (adminSection) adminSection.style.display = currentIsAdmin ? '' : 'none';
+
   // Owner name
   const ownerInput = document.getElementById('settingsOwnerName');
   if (ownerInput && document.activeElement !== ownerInput) {
@@ -4693,6 +5047,12 @@ function renderSettingsUI() {
   const cgtRateInput = document.getElementById('settingsCgtRate');
   if (cgtRateInput && document.activeElement !== cgtRateInput) {
     cgtRateInput.value = state.settings.cgtRatePct;
+  }
+
+  // NCCPL charge rate
+  const nccplRateInput = document.getElementById('settingsNccplRate');
+  if (nccplRateInput && document.activeElement !== nccplRateInput) {
+    nccplRateInput.value = state.settings.nccplChargeRatePct;
   }
 
   // Manual prices
@@ -4752,7 +5112,7 @@ async function loadSampleData() {
   if (!res.ok) { toast('Could not load sample data', 'error'); return; }
 
   state.transactions = (await (await fetch('/api/ledger', { credentials: 'include' })).json())
-    .map(t => ({ ...t, shares: parseFloat(t.shares), price: parseFloat(t.price), commission: parseFloat(t.commission) }));
+    .map(t => ({ ...t, shares: parseFloat(t.shares), price: parseFloat(t.price), commission: parseFloat(t.commission), nccplCharge: parseFloat(t.nccplCharge) || 0 }));
   state.prices = {};
   state.settings.manualPrices = {};
   savePricesCache();
@@ -4801,12 +5161,12 @@ function exportCSV() {
     toast('No transactions to export', 'warning');
     return;
   }
-  const headers = ['Date','Type','Symbol','Sector','Shares','Price','Commission','Total','Notes','SplitRatio'];
+  const headers = ['Date','Type','Symbol','Sector','Shares','Price','Commission','NCCPL Charge','Total','Notes','SplitRatio'];
   const rows = state.transactions
     .sort((a,b) => new Date(b.date)-new Date(a.date))
     .map(tx => [
       tx.date, tx.type.toUpperCase(), csvSafe(tx.symbol), csvSafe(tx.sector),
-      tx.shares, tx.price, tx.commission, (tx.shares * tx.price).toFixed(2), `"${csvSafe(tx.notes).replace(/"/g,'""')}"`,
+      tx.shares, tx.price, tx.commission, tx.nccplCharge, (tx.shares * tx.price).toFixed(2), `"${csvSafe(tx.notes).replace(/"/g,'""')}"`,
       tx.type === 'split' ? `${tx.splitRatioTo}:${tx.splitRatioFrom}` : ''
     ]);
   const ownerLine = state.settings.ownerName ? [[`Portfolio Owner: ${csvSafe(state.settings.ownerName)}`], []] : [];
@@ -4907,12 +5267,15 @@ function setText(id, text) {
    AUTH
 ══════════════════════════════════════════════════════ */
 let currentUsername = null;
+let currentIsAdmin = false;
 
 async function checkAuth() {
   try {
     const res = await fetch('/api/auth/me', { credentials: 'include' });
     if (!res.ok) { location.href = '/login.html'; return false; }
-    currentUsername = (await res.json()).username;
+    const me = await res.json();
+    currentUsername = me.username;
+    currentIsAdmin = !!me.isAdmin;
     return true;
   } catch(e) {
     location.href = '/login.html';
@@ -4928,6 +5291,60 @@ function updateAuthUI() {
 async function logout() {
   try { await fetch('/api/auth/logout', { method: 'POST', credentials: 'include' }); }
   finally { location.href = '/login.html'; }
+}
+
+/* ══════════════════════════════════════════════════════
+   ADMIN — RESET ANOTHER USER'S PASSWORD
+   Only rendered/callable for the seeded admin account (currentIsAdmin) - the server
+   independently enforces this on every /api/admin/* call regardless of what the client
+   shows, so hiding the UI here is a convenience, not the actual security boundary.
+══════════════════════════════════════════════════════ */
+async function renderAdminSection() {
+  const list = document.getElementById('adminUserList');
+  if (!list) return;
+  list.innerHTML = `<div style="color:var(--txt3);font-size:12px">Loading users…</div>`;
+
+  try {
+    const res = await fetch('/api/admin/users', { credentials: 'include' });
+    if (!res.ok) throw new Error('failed to load users');
+    const users = await res.json();
+
+    list.innerHTML = users.map(u => `
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:6px 10px;background:var(--elevated);border:1px solid var(--border);border-radius:var(--r)">
+        <span style="font-size:13px">${escapeHtml(u.username)}${u.username === currentUsername ? ' <span style="color:var(--txt3);font-size:11px">(you)</span>' : ''}</span>
+        <button class="btn btn-sm" onclick="openAdminResetPassword(${u.id}, '${escapeForJsAttr(u.username)}')">Reset Password</button>
+      </div>
+    `).join('');
+  } catch(e) {
+    list.innerHTML = `<div style="color:var(--red);font-size:12px">Could not load users</div>`;
+  }
+}
+
+async function openAdminResetPassword(id, username) {
+  const newPassword = prompt(`New password for "${username}" (8-128 characters):`);
+  if (newPassword === null) return; // cancelled
+  if (newPassword.length < 8 || newPassword.length > 128) {
+    toast('Password must be 8-128 characters', 'error');
+    return;
+  }
+  if (!confirm(`Set a new password for "${username}"? They'll need to use it to log in next time.`)) return;
+
+  try {
+    const res = await fetch(`/api/admin/users/${id}/reset-password`, {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ newPassword })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not reset password', 'error');
+      return;
+    }
+    toast(`Password reset for "${username}"`, 'success');
+  } catch(e) {
+    toast('Network error — could not reset password', 'error');
+  }
 }
 
 // One-time offer to import a browser's pre-migration localStorage ledger (from when
