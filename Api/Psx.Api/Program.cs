@@ -490,47 +490,32 @@ prices.MapPost("/historical", async (HistoricalPriceRequest req, PsxHistoricalPr
     return Results.Ok(new { prices = pricesOut, asOfDates = asOfOut });
 });
 
-// Direct server-to-server fetches of PSX's HTML pages (market-watch, indices) started
-// getting rejected outright from this host's IP - confirmed by PsxHistoricalPriceService's
-// JSON /timeseries/eod calls still working fine from the very same server while these two
-// consistently came back as errors, so it's specific to these HTML pages (likely PSX's
-// edge/WAF treating full-page scrapes more strictly than its data API), not a blanket
-// block. r.jina.ai's Reader API fetches from its own infrastructure and, asked for
-// X-Return-Format: html, hands back the raw page - used as a fallback so this doesn't
-// depend on a client-side CORS proxy that the browser would need to be pointed at.
-static async Task<IResult> FetchPsxHtmlAsync(HttpClient client, string psxPath)
+// Full per-symbol EOD series (not just one date) - feeds the Cumulative P&L chart, which
+// values past holdings at what they were actually worth on each historical date rather
+// than today's price.
+prices.MapPost("/history", async (PriceHistoryRequest req, PsxHistoricalPriceService svc) =>
 {
-    var url = $"https://dps.psx.com.pk/{psxPath}";
-    try
+    var result = new Dictionary<string, List<EodPricePointDto>>();
+    foreach (var sym in (req.Symbols ?? new List<string>()).Select(s => s.Trim().ToUpperInvariant()).Distinct())
     {
-        var html = await client.GetStringAsync(url);
-        return Results.Content(html, "text/html");
+        var series = await svc.GetFullHistory(sym);
+        result[sym] = series.Select(p => new EodPricePointDto(p.Date.ToString("yyyy-MM-dd"), p.Close)).ToList();
     }
-    catch (Exception)
-    {
-        try
-        {
-            var req = new HttpRequestMessage(HttpMethod.Get, $"https://r.jina.ai/{url}");
-            req.Headers.Add("X-Return-Format", "html");
-            var res = await client.SendAsync(req);
-            if (res.IsSuccessStatusCode)
-                return Results.Content(await res.Content.ReadAsStringAsync(), "text/html");
-        }
-        catch (Exception) { /* fall through to 502 below */ }
-        return Results.StatusCode(StatusCodes.Status502BadGateway);
-    }
-}
+    return Results.Ok(result);
+});
 
 // Server-side pass-through for PSX's live market-watch page - see the AddHttpClient()
 // comment above for why this exists instead of the client fetching it directly via a
 // third-party CORS proxy. Returns the raw HTML unchanged; the frontend's existing
 // DOMParser-based table parsing (fetchPSXMarketWatch) is untouched, only the URL it
-// fetches from changed.
+// fetches from changed. Fetch/fallback logic lives in PsxHtmlFetcher (shared with the
+// dividend-announcement service below).
 prices.MapGet("/market-watch", async (IHttpClientFactory httpFactory) =>
 {
     var client = httpFactory.CreateClient();
     client.Timeout = TimeSpan.FromSeconds(20);
-    return await FetchPsxHtmlAsync(client, "market-watch");
+    var html = await PsxHtmlFetcher.FetchAsync(client, "market-watch");
+    return html is not null ? Results.Content(html, "text/html") : Results.StatusCode(StatusCodes.Status502BadGateway);
 });
 
 // Same server-to-server pass-through, for PSX's /indices page (KSE100 and friends) -
@@ -539,7 +524,8 @@ prices.MapGet("/indices", async (IHttpClientFactory httpFactory) =>
 {
     var client = httpFactory.CreateClient();
     client.Timeout = TimeSpan.FromSeconds(20);
-    return await FetchPsxHtmlAsync(client, "indices");
+    var html = await PsxHtmlFetcher.FetchAsync(client, "indices");
+    return html is not null ? Results.Content(html, "text/html") : Results.StatusCode(StatusCodes.Status502BadGateway);
 });
 
 // ── CASH LEDGER ───────────────────────────────────────────────────────
@@ -833,10 +819,20 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
 
         // Server computes the NET (post-tax) amount itself - never trusts a
         // client-supplied Amount for a dividend, so Gross/Rate/Amount can't drift
-        // out of sync with each other.
+        // out of sync with each other. GrossAmount keeps the precise (possibly
+        // fractional) declared figure, but the actual cash movement - tax withheld
+        // and net credited - is always whole rupees in practice (CDC/bank transfers
+        // don't move paisas), so both are rounded to 0dp here. Rounding the tax
+        // first and deriving Amount = Gross - tax (rather than rounding each
+        // independently) keeps them tied to Gross exactly: whole-rupee rounding is
+        // shift-invariant, so (Gross - tax) rounds to (round(Gross) - tax) - meaning
+        // tax + Amount always equals Gross rounded to the nearest rupee, and any
+        // downstream display that re-derives tax as GrossAmount - Amount and rounds
+        // it will reconstruct this same whole tax value.
         grossAmount = gross;
         taxRatePct = rate;
-        amount = Math.Round(gross * (1 - rate / 100m), 4, MidpointRounding.AwayFromZero);
+        var taxWhole = Math.Round(gross * rate / 100m, 0, MidpointRounding.AwayFromZero);
+        amount = Math.Round(gross - taxWhole, 0, MidpointRounding.AwayFromZero);
     }
     else if (type == CashType.Deposit && req.CdcHoldAmount is decimal hold)
     {
@@ -910,6 +906,8 @@ record LedgerDto(int Id, string Type, string Symbol, string Sector, decimal Shar
 }
 record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amount = null, string? Symbol = null, bool CreditToCash = true, decimal? GrossAmount = null, decimal? TaxRatePct = null, decimal? CdcHoldAmount = null);
 record HistoricalPriceRequest(string Date, List<string>? Symbols);
+record PriceHistoryRequest(List<string>? Symbols);
+record EodPricePointDto(string Date, decimal Close);
 record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId, decimal? CgtAmount, decimal? CdcHoldAmount)
 {
     public static CashDto From(CashEntry e) => new(

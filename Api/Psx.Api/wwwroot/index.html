@@ -288,23 +288,29 @@ a{color:var(--accent);text-decoration:none}
   position:fixed;inset:0;background:rgba(13,24,41,.45);z-index:500;
   display:flex;align-items:center;justify-content:center;padding:20px;
   opacity:0;pointer-events:none;transition:opacity .2s;
+  overflow-y:auto;
 }
 .modal-backdrop.open{opacity:1;pointer-events:all}
 .modal{
   background:var(--card);border:1px solid var(--border);border-radius:var(--r2);
   width:100%;max-width:520px;box-shadow:var(--shadow);
   transform:translateY(-20px);transition:transform .2s;
+  max-height:calc(100vh - 40px);
+  display:flex;flex-direction:column;
+  margin:auto;
 }
 .modal-backdrop.open .modal{transform:none}
 .modal-hd{
   display:flex;align-items:center;justify-content:space-between;
   padding:16px 20px;border-bottom:1px solid var(--border2);
+  flex-shrink:0;
 }
 .modal-title{font-size:16px;font-weight:600}
-.modal-body{padding:20px}
+.modal-body{padding:20px;overflow-y:auto;flex:1 1 auto;min-height:0}
 .modal-ft{
   padding:16px 20px;border-top:1px solid var(--border2);
   display:flex;justify-content:flex-end;gap:8px;
+  flex-shrink:0;
 }
 
 /* ── FORM ────────────────────────────────────────────────────── */
@@ -554,10 +560,10 @@ a{color:var(--accent);text-decoration:none}
   </div>
 </div>
 
-<!-- ── ANALYST DISCLAIMER ─────────────────────────────────────── -->
+<!-- ── TECHNICAL SIGNAL DISCLAIMER ────────────────────────────── -->
 <div class="disclaimer">
-  <strong>⚠ Analyst View</strong>
-  The Buy / Hold / Sell signals below reflect fundamental, technical, and sector-level analysis based on historical PSX data and macroeconomic context.
+  <strong>⚠ Technical Signal</strong>
+  The Buy / Hold / Sell signals below are computed automatically from each holding's price history (trend vs moving averages, momentum, trading range) — a technical read only, not fundamental/company analysis.
   They are <strong>not financial advice</strong>. Always conduct your own due diligence before trading.
 </div>
 
@@ -594,7 +600,7 @@ a{color:var(--accent);text-decoration:none}
           <th>Dividends</th>
           <th>Return %</th>
           <th>Weight %</th>
-          <th>Analyst Signal</th>
+          <th>Technical Signal</th>
           <th>Actions</th>
         </tr>
       </thead>
@@ -701,10 +707,10 @@ a{color:var(--accent);text-decoration:none}
     <div id="realizedSection"></div>
   </section>
 
-  <!-- Analyst Summary -->
+  <!-- Technical Signal Summary -->
   <section>
     <div class="section-hd" style="margin-bottom:12px">
-      <div class="section-title">Analyst Summary</div>
+      <div class="section-title">Technical Signal Summary</div>
     </div>
     <div id="analystSummary"></div>
   </section>
@@ -718,7 +724,6 @@ a{color:var(--accent);text-decoration:none}
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-sm" onclick="openModalForSplit()">+ Record Split</button>
-      <button class="btn btn-sm" onclick="triggerPdfImport()">⬆ Import PDF</button>
       <button class="btn btn-sm" onclick="exportCSV()">⬇ Export CSV</button>
     </div>
   </div>
@@ -915,22 +920,22 @@ a{color:var(--accent);text-decoration:none}
         </div>
         <div class="form-group" id="cfAmountGroup">
           <label class="form-label">Amount (PKR)</label>
-          <input type="number" id="cfAmount" class="form-input mono" placeholder="0.00" min="0.01" step="0.01">
+          <input type="text" inputmode="decimal" id="cfAmount" class="form-input mono" placeholder="0.00" oninput="sanitizeDecimalInput(this)">
           <span class="form-error" id="errCfAmount"></span>
         </div>
         <div class="form-group" id="cfGrossGroup" style="display:none">
           <label class="form-label" id="cfGrossLabel">Gross Amount (PKR)</label>
-          <input type="number" id="cfGrossAmount" class="form-input mono" placeholder="0.00" min="0.01" step="0.01" oninput="updateDividendNetPreview()">
+          <input type="text" inputmode="decimal" id="cfGrossAmount" class="form-input mono" placeholder="0.00" oninput="sanitizeDecimalInput(this);updateDividendNetPreview()">
           <span class="form-error" id="errCfGrossAmount"></span>
         </div>
         <div class="form-group" id="cfTaxRateGroup" style="display:none">
           <label class="form-label">Tax Rate (%)</label>
-          <input type="number" id="cfTaxRatePct" class="form-input mono" min="0" max="100" step="0.01" oninput="updateDividendNetPreview()">
+          <input type="text" inputmode="decimal" id="cfTaxRatePct" class="form-input mono" oninput="sanitizeDecimalInput(this);updateDividendNetPreview()">
           <span class="form-error" id="errCfTaxRatePct"></span>
         </div>
         <div class="form-group" id="cfCdcHoldGroup" style="display:none">
           <label class="form-label">CDC Hold Against Charges/Dues (PKR)</label>
-          <input type="number" id="cfCdcHoldAmount" class="form-input mono" placeholder="0.00" min="0" step="0.01" oninput="updateDividendNetPreview()">
+          <input type="text" inputmode="decimal" id="cfCdcHoldAmount" class="form-input mono" placeholder="0.00" oninput="sanitizeDecimalInput(this);updateDividendNetPreview()">
           <span class="form-error" id="errCfCdcHoldAmount"></span>
         </div>
         <div class="form-group full" id="cfNetPreviewGroup" style="display:none">
@@ -1041,6 +1046,12 @@ a{color:var(--accent);text-decoration:none}
     </div>
     <div class="modal-body">
       <div class="form-grid">
+        <div class="form-group full" id="pdfImportHint">
+          <div style="background:var(--elevated);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--txt2);display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap">
+            <span>Have a broker contract note as a PDF instead? We'll read it and let you review each parsed transaction before anything is added — nothing is saved automatically.</span>
+            <button type="button" class="btn btn-sm" onclick="closeModal(); triggerPdfImport()" style="flex-shrink:0">⬆ Import PDF</button>
+          </div>
+        </div>
         <div class="form-group full" id="txTypeGroup">
           <div class="type-toggle">
             <div class="type-btn active-buy" id="typeBuyBtn" onclick="setTxType('buy')">▲ BUY</div>
@@ -1309,79 +1320,78 @@ const SAMPLE_TRANSACTIONS = [
 const SAMPLE_PRICES = {};
 
 /*
- * ANALYST SIGNALS — Fundamental + Technical + Sector Analysis
- * Basis: PSX historical performance, sector dynamics, macro outlook (PKR, rates, energy costs),
- *        earnings trajectory, dividend yield, liquidity, and relative valuation vs peers.
- * Confidence: high (3 dots) | medium (2 dots) | low (1 dot)
- * Note: signals reflect long-term analytical view, NOT short-term trading calls.
+ * TECHNICAL SIGNAL — computed live from each holding's real EOD price history
+ * (state.priceHistory, see loadPriceHistory/historicalPriceFor below), not a fixed
+ * per-symbol list - covers whatever is actually in the portfolio, old or newly added,
+ * with zero per-symbol maintenance. Deliberately technical-only (trend vs moving
+ * averages, momentum, trading range): this app has no fundamentals/earnings data
+ * source, so a dynamic signal can only honestly be built from price action, not
+ * company financials - see the disclaimer text wherever this is surfaced in the UI.
+ * Confidence reflects how much price history is available and how strongly the
+ * trend/momentum readings agree with each other, not conviction in a thesis.
  */
-const ANALYST_SIGNALS = {
-  EFERT: {
-    signal: 'HOLD', conf: 'medium',
-    rationale: 'Engro Fertilizers: Solid dividend payer with ~10–12% yield history. Urea demand supported by agriculture subsidy cycle. Key risk: gas curtailment raises input costs and cuts production. Valuation is fair; wait for clarity on gas allocation before adding.',
-    factors: ['Dividend yield attractive', 'Gas supply risk', 'Agri demand steady', 'Cyclical urea pricing']
-  },
-  FCCL: {
-    signal: 'HOLD', conf: 'low',
-    rationale: 'Fauji Cement: Smaller player in a heavily oversupplied cement market. High energy (coal/gas) costs compress margins. Exports to Afghanistan constrained by border policies. No near-term re-rating catalyst visible. Hold for dividend; avoid adding.',
-    factors: ['Sector oversupply persists', 'High energy cost base', 'Export route challenges', 'Limited growth catalyst']
-  },
-  FFC: {
-    signal: 'BUY', conf: 'high',
-    rationale: 'Fauji Fertilizer: Pakistan\'s largest urea producer with a ~25–30% market share. Consistently pays 60–80% of earnings as dividends — one of the most reliable income stocks on PSX. Strong balance sheet, low debt. Fertilizer demand structurally underpinned by crop-support programs. Preferred pick in the fertilizer space over EFERT.',
-    factors: ['Sector-leading dividend yield', 'Dominant market share', 'Low debt / strong FCF', 'Agri policy tailwinds']
-  },
-  ILP: {
-    signal: 'BUY', conf: 'medium',
-    rationale: 'Interloop: Niche export-oriented manufacturer (hosiery/socks) with global brands as clients (Nike, Adidas, H&M). Dollar revenues act as a natural PKR depreciation hedge. Expanding capacity in Bangladesh diversifies risk. Valuation reasonable vs regional peers. Watch for global demand slowdown and energy cost pressures.',
-    factors: ['Dollar revenue hedge', 'Global brand clientele', 'Capacity expansion ongoing', 'Watch global demand cycle']
-  },
-  LUCK: {
-    signal: 'BUY', conf: 'high',
-    rationale: 'Lucky Cement: Conglomerate discount understates true value — Iraq cement operations add significant offshore earnings. Diversification into pharma (ICI Pakistan), chemicals, and power gives resilience cement-only peers lack. Premium management quality, strong FCF. One of the most liquid large-caps on KSE-100.',
-    factors: ['Iraq ops = offshore USD earnings', 'Conglomerate diversification', 'Sector-best management', 'KSE-100 index weight support']
-  },
-  MARI: {
-    signal: 'BUY', conf: 'high',
-    rationale: 'Mari Energies: E&P company with one of Pakistan\'s largest gas field concessions. Rising production volumes, strong cash generation, and consistent dividend payouts. Government gas pricing reforms are a tailwind. Unlike OGDC, MARI has lower circular-debt exposure and faster cash collection. High-conviction hold in the energy space.',
-    factors: ['Strong production growth', 'Lower circular debt risk vs OGDC', 'Consistent dividends', 'Gas pricing reform tailwind']
-  },
-  MLCF: {
-    signal: 'HOLD', conf: 'low',
-    rationale: 'Maple Leaf Cement: Mid-tier cement producer facing same sector headwinds (oversupply, high energy costs) as peers but with a higher cost base. Expansion plans risk further diluting returns in a soft-demand environment. Limited export capability. Suitable as a trading vehicle but not a conviction long-term hold.',
-    factors: ['Sector-wide oversupply', 'Cost base above peers', 'Expansion risk in weak mkt', 'Short-term trade only']
-  },
-  MTL: {
-    signal: 'BUY', conf: 'high',
-    rationale: 'Millat Tractors: Near-monopoly in Pakistan\'s agricultural tractor market (~60% share). Agriculture mechanisation is a multi-decade structural theme. Excellent ROE (30%+), high dividend yield, minimal debt. Volumes track crop-support subsidies closely — watch for government subsidy announcements as a catalyst. One of the highest-quality small-cap franchises on PSX.',
-    factors: ['~60% market share monopoly', 'ROE consistently 30%+', 'Agri-mech structural trend', 'High dividend yield']
-  },
-  OGDC: {
-    signal: 'HOLD', conf: 'medium',
-    rationale: 'OGDC: State-owned E&P giant with attractive headline yield but chronic circular-debt receivables inflate reported earnings. Cash collection lags significantly. Government ownership adds political risk to dividend decisions. At current valuations the yield is compelling IF circular debt resolution accelerates — treat as a dividend watch, not a growth story.',
-    factors: ['Circular debt receivables risk', 'State ownership limits agility', 'High nominal dividend yield', 'Resolution pathway uncertain']
-  },
-  PAEL: {
-    signal: 'HOLD', conf: 'low',
-    rationale: 'Pak Elektron: Consumer appliances and power equipment. Appliance demand highly sensitive to purchasing power — inflation and high interest rates have suppressed volumes. Power division (transformers, meters) benefits from DISCO capex but collection issues mirror OGDC. Mixed outlook; wait for consumer demand recovery signals.',
-    factors: ['Consumer demand under pressure', 'Power division DISCO risk', 'Inflation squeezing real income', 'Await demand recovery']
-  },
-  SLM: {
-    signal: 'HOLD', conf: 'low',
-    rationale: 'Service Long March Tyres: Tyre manufacturer exposed to automotive and commercial vehicle cycles, both of which have been weak. Raw material (rubber, carbon black) costs are dollar-linked. CPEC logistics recovery could revive truck tyre demand. Limited analyst coverage makes valuation opaque. Hold pending sector recovery.',
-    factors: ['Auto sector cycle weakness', 'Dollar-linked input costs', 'CPEC logistics potential', 'Low analyst coverage']
-  },
-  SPSL: {
-    signal: 'SELL', conf: 'low',
-    rationale: 'Sitara Petroleum Service: Small-cap oil field services company with low liquidity, thin float, and limited earnings transparency. Oilfield services revenues are lumpy and contract-dependent. Macro headwinds for domestic E&P capex spending. Difficult to value reliably; consider rotating capital into higher-conviction names (FFC, LUCK, MARI, SYS).',
-    factors: ['Low float / poor liquidity', 'Lumpy contract revenues', 'E&P capex headwinds', 'Better alternatives available']
-  },
-  SYS: {
-    signal: 'BUY', conf: 'high',
-    rationale: 'Systems Limited: Pakistan\'s premier IT services exporter. Revenues denominated primarily in USD (natural PKR hedge). Consistent 20–25% EPS CAGR over 5 years. Blue-chip client roster, expanding offshore delivery. IT sector benefits from government STZA incentives and low effective tax rates. The highest-quality growth franchise on PSX — core long-term holding.',
-    factors: ['USD revenue / PKR hedge', '20-25% EPS CAGR history', 'STZA tax incentives', 'Premium growth franchise']
-  },
-};
+function computeTechnicalSignal(symbol) {
+  const series = state.priceHistory[symbol];
+  if (!series || series.length < 20) return null; // not enough history loaded yet
+
+  const closes = series.map(p => p.close);
+  const last = closes[closes.length - 1];
+  const lastDate = series[series.length - 1].date;
+
+  const sma = n => closes.length >= n ? closes.slice(-n).reduce((a, b) => a + b, 0) / n : null;
+  const sma50 = sma(50);
+  const sma200 = sma(200);
+
+  // Nearest close on/after ~90 calendar days back, for a momentum read.
+  const cutoff = new Date(lastDate);
+  cutoff.setDate(cutoff.getDate() - 90);
+  const cutoffStr = cutoff.toISOString().slice(0, 10);
+  let momentum90 = null;
+  for (const pt of series) {
+    if (pt.date >= cutoffStr) {
+      if (pt.close > 0) momentum90 = (last - pt.close) / pt.close;
+      break;
+    }
+  }
+
+  const lookback = closes.slice(-252); // ~52 trading weeks, or all available if shorter
+  const high = Math.max(...lookback);
+  const low = Math.min(...lookback);
+
+  let score = 0, contributors = 0;
+  if (sma50 != null) { contributors++; score += last > sma50 ? 1 : -1; }
+  if (sma50 != null && sma200 != null) { contributors++; score += sma50 > sma200 ? 1 : -1; }
+  if (momentum90 != null) {
+    if (momentum90 > 0.05) { contributors++; score += 1; }
+    else if (momentum90 < -0.05) { contributors++; score -= 1; }
+  }
+  if (contributors === 0) return null;
+
+  const signal = score >= 2 ? 'BUY' : score <= -2 ? 'SELL' : 'HOLD';
+  const conf = contributors < 2 ? 'low'
+    : Math.abs(score) === contributors ? 'high'
+    : Math.abs(score) >= 2 ? 'medium'
+    : 'low';
+
+  const trendPhrase = sma50 != null && sma200 != null
+    ? (last > sma50 && sma50 > sma200 ? 'a confirmed uptrend' : last < sma50 && sma50 < sma200 ? 'a confirmed downtrend' : 'a mixed trend')
+    : sma50 != null ? (last > sma50 ? 'a short-term uptrend' : 'a short-term downtrend') : 'not enough history for a trend read';
+  const rangeLabel = lookback.length >= 200 ? '52-week' : `${lookback.length}-day`;
+  const momentumText = momentum90 != null
+    ? `${momentum90 >= 0 ? '+' : ''}${(momentum90 * 100).toFixed(1)}% over the past ~90 days`
+    : 'momentum unavailable (limited history)';
+
+  const rationale = `${symbol}: Currently in ${trendPhrase}, ${momentumText}. Trading at PKR ${fPKR(last)} within a ${rangeLabel} range of PKR ${fPKR(low)}–${fPKR(high)}. Computed automatically from price history — a technical read only, not fundamental analysis.`;
+
+  const factors = [
+    sma50 != null ? `${last > sma50 ? 'Above' : 'Below'} 50-day average` : '50-day average unavailable',
+    sma200 != null ? `${sma50 > sma200 ? 'Rising' : 'Declining'} long-term trend` : '200-day average unavailable',
+    momentumText,
+    `${rangeLabel} range PKR ${fPKR(low)}–${fPKR(high)}`
+  ];
+
+  return { signal, conf, rationale, factors };
+}
 
 // chargesFor(tx): whether to fold this transaction's Commission + NCCPL charge into
 // cost basis / proceeds, per the "Include Commission in Cost" setting - both are
@@ -1410,6 +1420,11 @@ let state = {
     nccplChargeRatePct: 0.007
   },
   prices: {},
+  // Per-symbol EOD close-price series, keyed by symbol -> [{date, close}] ascending by
+  // date. Populated lazily/in the background by loadPriceHistory() as the Cumulative P&L
+  // chart needs symbols - unlike `prices` (today's live quote), this is a full historical
+  // series used to value past holdings at what they were actually worth on that date.
+  priceHistory: {},
   cash: { balance: 0, entries: [] },
   index: null, // { value, change, changePct } for KSE100, or null until first fetched
   // Per-table "show all" toggles (Transaction History / Realized P&L / Cash Ledger) -
@@ -1685,6 +1700,52 @@ function computeHoldingsAsOf(cutoffDate) {
 let asOfRows = {};
 let asOfRequestedDate = null;
 
+// Fetches full EOD history for any of `symbols` not already cached in
+// state.priceHistory, merges the result in, and returns true if anything new was fetched
+// (the caller re-renders the Cumulative P&L chart only in that case, so a render with a
+// fully-warm cache doesn't kick off a pointless request). Silent on failure - the chart
+// just keeps using whatever's cached (or falls back to the live price) rather than
+// blocking on PSX's undocumented, sometimes-flaky historical endpoint.
+let isLoadingPriceHistory = false;
+async function loadPriceHistory(symbols) {
+  const missing = [...new Set(symbols)].filter(s => !(s in state.priceHistory));
+  if (missing.length === 0 || isLoadingPriceHistory) return false;
+  isLoadingPriceHistory = true;
+  try {
+    const res = await fetch('/api/prices/history', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbols: missing })
+    });
+    if (!res.ok) return false;
+    const data = await res.json();
+    for (const sym of missing) state.priceHistory[sym] = data[sym] || [];
+    return true;
+  } catch (e) {
+    return false;
+  } finally {
+    isLoadingPriceHistory = false;
+  }
+}
+
+// Latest cached close on or before `dateStr` for `sym` - mirrors the backend's "nearest
+// trading day on or before" rule. Falls back to today's live price (state.prices) when no
+// historical data is cached yet for this symbol (e.g. the background fetch hasn't
+// resolved), so the chart still renders something rather than a gap.
+function historicalPriceFor(sym, dateStr) {
+  const series = state.priceHistory[sym];
+  if (series && series.length) {
+    let price = null;
+    for (const pt of series) {
+      if (pt.date > dateStr) break;
+      price = pt.close;
+    }
+    if (price != null) return price;
+  }
+  return state.prices[sym]?.price ?? null;
+}
+
 async function calculateAsOf() {
   const dateStr = document.getElementById('asOfDate').value;
   if (!dateStr) {
@@ -1887,6 +1948,99 @@ function computeRealizedPL() {
   }
 
   return { bySymbol, total };
+}
+
+// One snapshot per distinct transaction date, plus a final one for today (if today isn't
+// already a transaction date): cumulative realized P&L booked so far, plus the running
+// per-symbol {shares, totalCost} needed to value remaining holdings later (once a
+// historical price is known - this function itself is price-agnostic). Mirrors
+// computeRealizedPL's WA/FIFO bookkeeping and split handling exactly, since the Cumulative
+// P&L chart must reflect the same cost method as the rest of the app, not a fixed one -
+// see the "New transaction kind must branch explicitly" convention at the top of this file.
+// The trailing today-snapshot exists so the chart's last point reflects the portfolio's
+// current mark-to-market value even on days with no trading activity, rather than going
+// stale at whenever the last buy/sell/split happened - see the render step below, which
+// prefers the live quote over a historical close specifically for this appended date.
+function computeCumulativePLSnapshots() {
+  const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date) || a.id-b.id);
+  if (!sorted.length) return [];
+
+  const useFifo = state.settings.costMethod === 'fifo';
+  const lots = {};       // FIFO: sym -> [{shares, costPerShare}]
+  const runningAvg = {}; // WA:   sym -> {shares, totalCost}
+  let realizedCum = 0;
+  let txIdx = 0;
+
+  const dates = [...new Set(sorted.map(t => t.date))].sort();
+  const todayStr = new Date().toISOString().split('T')[0];
+  if (dates[dates.length - 1] < todayStr) dates.push(todayStr);
+  const snapshots = [];
+
+  for (const dt of dates) {
+    while (txIdx < sorted.length && sorted[txIdx].date <= dt) {
+      const tx = sorted[txIdx]; txIdx++;
+      const sym = tx.symbol;
+
+      if (tx.type === 'split') {
+        const ratio = tx.splitRatioTo / tx.splitRatioFrom;
+        if (useFifo) { if (lots[sym]) for (const lot of lots[sym]) { lot.shares *= ratio; lot.costPerShare /= ratio; } }
+        else if (runningAvg[sym]) runningAvg[sym].shares *= ratio;
+        continue;
+      }
+
+      const comm = chargesFor(tx);
+
+      if (tx.type === 'buy') {
+        if (useFifo) {
+          if (!lots[sym]) lots[sym] = [];
+          lots[sym].push({ shares: tx.shares, costPerShare: (tx.shares * tx.price + comm) / tx.shares });
+        } else {
+          if (!runningAvg[sym]) runningAvg[sym] = { shares: 0, totalCost: 0 };
+          runningAvg[sym].totalCost += tx.shares * tx.price + comm;
+          runningAvg[sym].shares += tx.shares;
+        }
+      } else {
+        const proceeds = tx.shares * tx.price - comm;
+        let costBasis = 0;
+        if (useFifo) {
+          if (!lots[sym]) lots[sym] = [];
+          let remaining = tx.shares;
+          while (remaining > 1e-9 && lots[sym].length > 0) {
+            const lot = lots[sym][0];
+            if (lot.shares <= remaining + 1e-9) {
+              costBasis += lot.shares * lot.costPerShare;
+              remaining -= lot.shares;
+              lots[sym].shift();
+            } else {
+              costBasis += remaining * lot.costPerShare;
+              lot.shares -= remaining;
+              remaining = 0;
+            }
+          }
+        } else if (runningAvg[sym] && runningAvg[sym].shares > 1e-9) {
+          const avg = runningAvg[sym].totalCost / runningAvg[sym].shares;
+          costBasis = avg * tx.shares;
+          runningAvg[sym].totalCost = Math.max(0, runningAvg[sym].totalCost - costBasis);
+          runningAvg[sym].shares = Math.max(0, runningAvg[sym].shares - tx.shares);
+        }
+        realizedCum += proceeds - costBasis;
+      }
+    }
+
+    const holdings = {};
+    for (const sym of new Set([...Object.keys(lots), ...Object.keys(runningAvg)])) {
+      const shares = useFifo
+        ? (lots[sym] || []).reduce((s, l) => s + l.shares, 0)
+        : (runningAvg[sym]?.shares || 0);
+      const totalCost = useFifo
+        ? (lots[sym] || []).reduce((s, l) => s + l.shares * l.costPerShare, 0)
+        : (runningAvg[sym]?.totalCost || 0);
+      if (shares > 1e-9) holdings[sym] = { shares, totalCost };
+    }
+    snapshots.push({ date: dt, realizedCum, holdings });
+  }
+
+  return snapshots;
 }
 
 /* ══════════════════════════════════════════════════════
@@ -2938,45 +3092,51 @@ async function refreshPrices(silent = false) {
   let fetched = 0;
   let failed = 0;
   let fetchSucceeded = false;
+  let noDataAtAll = [];
 
-  // PSX market-watch covers every symbol in one request
+  // Everything below can throw (network, parsing, or a downstream render error) - if it
+  // does, we must still release the isFetching latch and restore the button/spinner,
+  // otherwise every future refresh (manual or the 60s auto-tick) silently no-ops forever.
   try {
-    const { ok, results: bulk } = await fetchPSXMarketWatch(symbols);
-    fetchSucceeded = ok;
-    for (const [sym, d] of Object.entries(bulk)) {
-      state.prices[sym] = d;
-      fetched++;
-    }
-  } catch(e) {}
+    // PSX market-watch covers every symbol in one request
+    try {
+      const { ok, results: bulk } = await fetchPSXMarketWatch(symbols);
+      fetchSucceeded = ok;
+      for (const [sym, d] of Object.entries(bulk)) {
+        state.prices[sym] = d;
+        fetched++;
+      }
+    } catch(e) {}
 
-  // Anything not returned (delisted/typo/thin trading/proxy miss) falls back to manual override
-  const missing = symbols.filter(s => !state.prices[s] || state.prices[s].status !== 'live');
-  const noDataAtAll = [];
-  for (const sym of missing) {
-    if (state.settings.manualPrices[sym] != null) {
-      state.prices[sym] = {
-        price: state.settings.manualPrices[sym],
-        change: state.prices[sym]?.change || 0,
-        changePct: state.prices[sym]?.changePct || 0,
-        status: 'manual',
-        updatedAt: Date.now()
-      };
-    } else {
-      noDataAtAll.push(sym);
+    // Anything not returned (delisted/typo/thin trading/proxy miss) falls back to manual override
+    const missing = symbols.filter(s => !state.prices[s] || state.prices[s].status !== 'live');
+    for (const sym of missing) {
+      if (state.settings.manualPrices[sym] != null) {
+        state.prices[sym] = {
+          price: state.settings.manualPrices[sym],
+          change: state.prices[sym]?.change || 0,
+          changePct: state.prices[sym]?.changePct || 0,
+          status: 'manual',
+          updatedAt: Date.now()
+        };
+      } else {
+        noDataAtAll.push(sym);
+      }
+      failed++;
     }
-    failed++;
+
+    savePricesCache();
+    renderAll();
+
+    const ts = new Date().toLocaleTimeString();
+    document.getElementById('lastUpdated').textContent = ts;
+    dot.className = failed < symbols.length ? 'status-dot live' : 'status-dot';
+  } finally {
+    icon.className = '';
+    icon.textContent = '↻';
+    btn.disabled = false;
+    isFetching = false;
   }
-
-  savePricesCache();
-  renderAll();
-
-  const ts = new Date().toLocaleTimeString();
-  document.getElementById('lastUpdated').textContent = ts;
-  dot.className = failed < symbols.length ? 'status-dot live' : 'status-dot';
-  icon.className = '';
-  icon.textContent = '↻';
-  btn.disabled = false;
-  isFetching = false;
 
   // The automatic once-a-minute tick stays quiet - the status dot and "last updated"
   // time already give visual confirmation without a toast firing every 60 seconds.
@@ -3057,9 +3217,9 @@ function colorKPI(id, value) {
    ANALYST SIGNAL CELL RENDERER
 ══════════════════════════════════════════════════════ */
 function renderSignalCell(symbol) {
-  const sig = ANALYST_SIGNALS[symbol];
+  const sig = computeTechnicalSignal(symbol);
   if (!sig) {
-    return `<span style="color:var(--txt3);font-size:11px">—</span>`;
+    return `<span style="color:var(--txt3);font-size:11px" title="Not enough price history loaded yet for ${escapeHtml(symbol)}">—</span>`;
   }
 
   const icons = { BUY:'▲', HOLD:'◆', SELL:'▼' };
@@ -3111,7 +3271,7 @@ function renderHoldingsTable() {
       const rank = { BUY:0, HOLD:1, SELL:2 };
       const crank = { high:0, medium:1, low:2 };
       sorted.sort((a,b) => {
-        const sa = ANALYST_SIGNALS[a.symbol], sb = ANALYST_SIGNALS[b.symbol];
+        const sa = computeTechnicalSignal(a.symbol), sb = computeTechnicalSignal(b.symbol);
         const ra = sa ? rank[sa.signal] : 3, rb = sb ? rank[sb.signal] : 3;
         if (ra !== rb) return ra - rb;
         const ca = sa ? crank[sa.conf] : 3, cb = sb ? crank[sb.conf] : 3;
@@ -3311,46 +3471,34 @@ function renderCharts() {
   }
 
   // ── 5. Cumulative P&L Line ───────────────────────────────
+  // Realized (booked from sells so far) + unrealized (remaining holdings valued at that
+  // date's actual historical close, not today's price) at each transaction date - see
+  // computeCumulativePLSnapshots() and historicalPriceFor(). Historical closes are fetched
+  // lazily in the background (loadPriceHistory); until they land for a given symbol,
+  // historicalPriceFor() falls back to today's live price so the chart still renders.
+  // This same fetch also feeds computeTechnicalSignal() (Holdings table's Technical
+  // Signal column + the Technical Signal Summary panel), so a full renderAll() - not
+  // just this chart - runs once new history lands, catching those up too.
   destroyChart('cumulChart');
   {
-    const sorted = [...state.transactions].sort((a,b) => new Date(a.date)-new Date(b.date));
-    if (sorted.length) {
-      // Build running WA holdings and estimate cumulative PL by date
-      const dates = [...new Set(sorted.map(t => t.date))].sort();
-      const points = [];
-      let runningHoldings = {};
-      let txIdx = 0;
+    const snapshots = computeCumulativePLSnapshots();
+    if (snapshots.length) {
+      const allSymbols = [...new Set(state.transactions.map(t => t.symbol))];
+      loadPriceHistory(allSymbols).then(gotNew => { if (gotNew) renderAll(); });
 
-      for (const dt of dates) {
-        while (txIdx < sorted.length && sorted[txIdx].date <= dt) {
-          const tx = sorted[txIdx];
-          const comm = chargesFor(tx);
-          const sym  = tx.symbol;
-          if (tx.type === 'buy') {
-            if (!runningHoldings[sym]) runningHoldings[sym] = { shares:0, totalCost:0 };
-            runningHoldings[sym].totalCost += tx.shares * tx.price + comm;
-            runningHoldings[sym].shares += tx.shares;
-          } else {
-            if (runningHoldings[sym] && runningHoldings[sym].shares > 0) {
-              const avg = runningHoldings[sym].totalCost / runningHoldings[sym].shares;
-              runningHoldings[sym].totalCost = Math.max(0, runningHoldings[sym].totalCost - avg * tx.shares);
-              runningHoldings[sym].shares = Math.max(0, runningHoldings[sym].shares - tx.shares);
-            }
-          }
-          txIdx++;
+      const todayStr = new Date().toISOString().split('T')[0];
+      const points = snapshots.map(s => {
+        const isToday = s.date === todayStr;
+        let unrealized = 0;
+        for (const sym in s.holdings) {
+          const h = s.holdings[sym];
+          // Today's point should reflect the freshest known price, not a possibly-stale
+          // historical close (e.g. mid-session, before today's EOD close is published).
+          const price = (isToday ? state.prices[sym]?.price : null) ?? historicalPriceFor(sym, s.date);
+          if (price != null) unrealized += price * h.shares - h.totalCost;
         }
-        // Estimate PL using current prices
-        let pl = 0;
-        for (const sym in runningHoldings) {
-          const rh = runningHoldings[sym];
-          if (rh.shares < 1e-9) continue;
-          const p = state.prices[sym];
-          if (p && p.price) {
-            pl += p.price * rh.shares - rh.totalCost;
-          }
-        }
-        points.push({ x: dt, y: +pl.toFixed(2) });
-      }
+        return { x: s.date, y: +(s.realizedCum + unrealized).toFixed(2) };
+      });
 
       chartInstances.cumulChart = new Chart(document.getElementById('cumulChart'), {
         type: 'line',
@@ -3639,7 +3787,7 @@ function renderTransactionLog() {
         <td>—</td>
         <td>—</td>
         <td>—</td>
-        <td class="val-pos">+${fPKR(tx.amount)}</td>
+        <td class="val-pos">+${fPKR0(tx.amount)}</td>
         <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(tx.notes)||'—'}</td>
         <td style="text-align:center">
           <button class="btn btn-sm btn-danger" onclick="deleteCashEntry('${tx.id}')">✕</button>
@@ -3696,7 +3844,7 @@ function renderTaxReport() {
     .reduce((sum, c) => sum + (c.grossAmount - c.amount), 0);
 
   const el = document.getElementById('taxReportTotal');
-  if (el) el.textContent = `PKR ${fPKR(totalTax)}`;
+  if (el) el.textContent = `PKR ${fPKR0(totalTax)}`;
 }
 
 function getSymbolDividendTotal(symbol) {
@@ -3762,7 +3910,7 @@ function renderSymbolDetailModal(symbol) {
       return `<tr>
         <td style="text-align:left;font-family:var(--mono)">${h.date}</td>
         <td style="text-align:left"><span class="tx-type dividend">DIVIDEND</span></td>
-        <td class="val-pos">+${fPKR(h.amount)}</td>
+        <td class="val-pos">+${fPKR0(h.amount)}</td>
         <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(h.notes)||'—'}</td>
       </tr>`;
     }
@@ -3877,7 +4025,7 @@ function renderCashLedger() {
 
   tbody.innerHTML = displayed.map(c => {
     const taxSubtext = (c.type === 'dividend' && c.grossAmount != null)
-      ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Gross ${fPKR(c.grossAmount)} − Tax ${fPKR(c.grossAmount - c.amount)} (${fPct(c.taxRatePct||0)})</span>`
+      ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Gross ${fPKR(c.grossAmount)} − Tax ${fPKR0(c.grossAmount - c.amount)} (${fPct(c.taxRatePct||0)})</span>`
       : (c.type === 'deposit' && c.cdcHoldAmount != null && c.cdcHoldAmount > 0)
       ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">Deposited ${fPKR(c.grossAmount)} − CDC Hold ${fPKR(c.cdcHoldAmount)}</span>`
       : (c.cgtAmount != null
@@ -3894,7 +4042,7 @@ function renderCashLedger() {
     <td style="text-align:left;font-family:var(--mono)">${c.date}</td>
     <td style="text-align:left"><span class="tx-type ${c.type}">${typeLabel}</span></td>
     <td style="text-align:left"><span class="sym">${escapeHtml(c.symbol)||'—'}</span></td>
-    <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${fPKR(c.amount)}${taxSubtext}</td>
+    <td class="${c.type==='withdrawal'?'val-neg':'val-pos'}">${c.type==='withdrawal'?'-':'+'}${c.type==='dividend'?fPKR0(c.amount):fPKR(c.amount)}${taxSubtext}</td>
     <td style="font-family:var(--mono)">${fPKR(c.runningBalance)}</td>
     <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(c.notes)||'—'}</td>
     <td style="text-align:center">
@@ -3943,13 +4091,20 @@ function renderAnalystSummary() {
   const confLabel = { high:'High conviction', medium:'Moderate', low:'Low conviction' };
 
   const rows = activeSymbols
-    .map(sym => ({ sym, sig: ANALYST_SIGNALS[sym] }))
+    .map(sym => ({ sym, sig: computeTechnicalSignal(sym) }))
     .filter(r => r.sig)
     .sort((a, b) => {
       const rs = sigRank[a.sig.signal] - sigRank[b.sig.signal];
       if (rs !== 0) return rs;
       return confRank[b.sig.conf] - confRank[a.sig.conf];
     });
+
+  // computeTechnicalSignal() needs at least ~20 days of price history for a symbol
+  // before it can compute anything - a held symbol missing here is usually just waiting
+  // on its background price-history fetch (loadPriceHistory, triggered from the
+  // Cumulative P&L chart render) to land, not a permanent gap. List these explicitly so
+  // it reads as "still loading" rather than looking like a stuck/broken row.
+  const uncovered = activeSymbols.filter(sym => !computeTechnicalSignal(sym)).sort();
 
   // Tally counts
   const counts = { BUY: 0, HOLD: 0, SELL: 0 };
@@ -3980,8 +4135,14 @@ function renderAnalystSummary() {
         </div>`
       ).join('')}
     </div>
+    ${uncovered.length ? `
+    <div style="margin-top:10px;padding:8px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid var(--border2)">
+      <div style="font-size:10px;color:var(--txt3);line-height:1.4">
+        Loading price history for: <span style="font-family:var(--mono);color:var(--txt2)">${uncovered.map(escapeHtml).join(', ')}</span> — signal appears once enough data arrives.
+      </div>
+    </div>` : ''}
     <div style="font-size:10px;color:var(--txt3);margin-top:10px;line-height:1.4">
-      Hover over any signal in the table or panel for full rationale. Not financial advice.
+      Hover over any signal in the table or panel for the full computed rationale. Technical read only (trend/momentum from price history) — not fundamental analysis or financial advice.
     </div>`;
 }
 
@@ -4393,7 +4554,7 @@ async function addCashEntry(data) {
   // from Gross - deduction) - compute the same net here just for the toast message.
   const netForToast = payload.amount != null ? payload.amount
     : payload.type === 'deposit' ? payload.grossAmount - (payload.cdcHoldAmount || 0)
-    : payload.type === 'dividend' ? payload.grossAmount * (1 - (payload.taxRatePct || 0) / 100)
+    : payload.type === 'dividend' ? Math.round(payload.grossAmount - Math.round(payload.grossAmount * (payload.taxRatePct || 0) / 100))
     : payload.grossAmount;
 
   try {
@@ -4410,7 +4571,7 @@ async function addCashEntry(data) {
     }
     await reloadCash();
     renderAll();
-    toast(`${payload.type} of PKR ${fPKR(netForToast)} added`, 'success');
+    toast(`${payload.type} of PKR ${payload.type === 'dividend' ? fPKR0(netForToast) : fPKR(netForToast)} added`, 'success');
     return true;
   } catch(e) {
     toast('Network error — could not add cash entry', 'error');
@@ -4502,15 +4663,34 @@ function updateCashModalMode() {
   if (isDividend || isCdcDeposit) updateDividendNetPreview();
 }
 
+// Plain-text + inputmode="decimal" amount fields (not type="number") so typing "."
+// always works - native number inputs reject the decimal point entirely on locales
+// whose regional format uses a different separator, silently leaving only the digits
+// typed before it (looks like the amount got "rounded" but the "." was never accepted).
+function sanitizeDecimalInput(el) {
+  let v = el.value.replace(/[^0-9.]/g, '');
+  const dot = v.indexOf('.');
+  if (dot !== -1) v = v.slice(0, dot + 1) + v.slice(dot + 1).replace(/\./g, '');
+  el.value = v;
+}
+
 function updateDividendNetPreview() {
   const isCdcDeposit = document.getElementById('cfType').value === 'deposit';
   const gross = parseFloat(document.getElementById('cfGrossAmount').value) || 0;
-  const deduction = isCdcDeposit
-    ? (parseFloat(document.getElementById('cfCdcHoldAmount').value) || 0)
-    : (gross * (parseFloat(document.getElementById('cfTaxRatePct').value) || 0) / 100);
-  const net = gross - deduction;
-  document.getElementById('cfTaxPreview').textContent = `PKR ${fPKR(deduction)}`;
-  document.getElementById('cfNetPreview').textContent = `PKR ${fPKR(net)}`;
+  if (isCdcDeposit) {
+    const hold = parseFloat(document.getElementById('cfCdcHoldAmount').value) || 0;
+    document.getElementById('cfTaxPreview').textContent = `PKR ${fPKR(hold)}`;
+    document.getElementById('cfNetPreview').textContent = `PKR ${fPKR(gross - hold)}`;
+    return;
+  }
+  // Whole-rupee tax/net, matching the server's Amount computation exactly (see the
+  // note in Program.cs's cash-entry endpoint) - Gross Amount itself stays precise
+  // (2dp) as entered/declared.
+  const rate = parseFloat(document.getElementById('cfTaxRatePct').value) || 0;
+  const taxWhole = Math.round(gross * rate / 100);
+  const net = Math.round(gross - taxWhole);
+  document.getElementById('cfTaxPreview').textContent = `PKR ${fPKR0(taxWhole)}`;
+  document.getElementById('cfNetPreview').textContent = `PKR ${fPKR0(net)}`;
 }
 
 function setCreditToCash(credit) {
@@ -4632,6 +4812,7 @@ function setOpeningModeUI(isOpening) {
   document.getElementById('commissionGroup').style.display = isOpening ? 'none' : '';
   document.getElementById('nccplGroup').style.display = isOpening ? 'none' : '';
   document.getElementById('openingHint').style.display = isOpening ? '' : 'none';
+  document.getElementById('pdfImportHint').style.display = isOpening ? 'none' : '';
   if (isOpening) {
     document.getElementById('fCommission').value = '0';
     document.getElementById('fNccplCharge').value = '0';
@@ -4656,6 +4837,7 @@ function setSplitModeUI(isSplit) {
   document.getElementById('commissionGroup').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
   document.getElementById('nccplGroup').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
   document.getElementById('splitHint').style.display = isSplit ? '' : 'none';
+  document.getElementById('pdfImportHint').style.display = isSplit ? 'none' : (openingMode ? 'none' : '');
   if (isSplit) {
     document.getElementById('fCommission').value = '0';
     document.getElementById('fNccplCharge').value = '0';
@@ -5241,6 +5423,17 @@ function escapeForJsAttr(str) {
 function fPKR(v, showSign = false) {
   const abs = Math.abs(v).toLocaleString('en-PK', {
     minimumFractionDigits: 2, maximumFractionDigits: 2
+  });
+  if (showSign) return v >= 0 ? `+${abs}` : `−${abs}`;
+  return abs;
+}
+
+// Whole-rupee formatting - for dividend tax withheld/net received, which are always
+// whole rupees in practice (see the Amount computation note in Program.cs's cash-entry
+// endpoint), never fractional like the precise, possibly-decimal Gross Amount.
+function fPKR0(v, showSign = false) {
+  const abs = Math.round(Math.abs(v)).toLocaleString('en-PK', {
+    minimumFractionDigits: 0, maximumFractionDigits: 0
   });
   if (showSign) return v >= 0 ? `+${abs}` : `−${abs}`;
   return abs;

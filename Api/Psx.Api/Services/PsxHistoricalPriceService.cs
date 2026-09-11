@@ -20,14 +20,30 @@ public class PsxHistoricalPriceService(HttpClient http, PsxDbContext db)
     // PSX has no data (or is unreachable) for this symbol.
     public async Task<(decimal? Close, DateOnly? ActualDate)> GetPriceAsOf(string symbol, DateOnly targetDate)
     {
-        var cached = await FindCached(symbol, targetDate);
-        if (cached is not null) return (cached.Close, cached.Date);
+        // A cached row satisfying `Date <= targetDate` is NOT enough on its own to trust
+        // the cache - that condition stays true forever once any row exists at all, even
+        // if PSX has since posted months of newer closes we never fetched (this was a
+        // real bug: every symbol's cache silently froze at whatever date this feature was
+        // first used, since a stale row always "matched"). Only skip the live fetch when
+        // we've already cached history reaching at least up to targetDate - i.e. there's
+        // provably nothing newer-but-still-<=-targetDate left to find.
+        var latestCachedDate = await db.EodPrices
+            .Where(p => p.Symbol == symbol)
+            .Select(p => (DateOnly?)p.Date)
+            .OrderByDescending(d => d)
+            .FirstOrDefaultAsync();
+
+        if (latestCachedDate is not null && latestCachedDate >= targetDate)
+        {
+            var cached = await FindCached(symbol, targetDate);
+            if (cached is not null) return (cached.Close, cached.Date);
+        }
 
         try
         {
             var resp = await http.GetFromJsonAsync<PsxEodResponse>($"timeseries/eod/{symbol}");
             if (resp is null || resp.Status != 1 || resp.Data is null || resp.Data.Count == 0)
-                return (null, null);
+                throw new InvalidOperationException("empty/unrecognized response");
 
             var rows = resp.Data
                 .Where(row => row.Count >= 2)
@@ -41,10 +57,24 @@ public class PsxHistoricalPriceService(HttpClient http, PsxDbContext db)
         }
         catch (Exception)
         {
-            // PSX unreachable, timed out, or returned something we couldn't parse -
-            // genuinely unavailable for this symbol right now, not a crash.
-            return (null, null);
+            // PSX unreachable, timed out, or returned something we couldn't parse - fall
+            // back to whatever's cached (even if stale) rather than nothing at all.
+            var cached = await FindCached(symbol, targetDate);
+            return cached is not null ? (cached.Close, cached.Date) : (null, null);
         }
+    }
+
+    // Returns the full cached EOD series for `symbol`, ascending by date - used by the
+    // Cumulative P&L chart, which needs a price at many past dates, not just one. Reuses
+    // GetPriceAsOf's caching (a single live fetch backfills a symbol's entire history, see
+    // its comment above) rather than duplicating the fetch/cache logic here.
+    public async Task<List<EodPrice>> GetFullHistory(string symbol)
+    {
+        await GetPriceAsOf(symbol, DateOnly.FromDateTime(DateTime.UtcNow));
+        return await db.EodPrices
+            .Where(p => p.Symbol == symbol)
+            .OrderBy(p => p.Date)
+            .ToListAsync();
     }
 
     async Task<EodPrice?> FindCached(string symbol, DateOnly targetDate) =>
