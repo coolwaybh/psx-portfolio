@@ -6,6 +6,7 @@ Api/Psx.Api/appsettings.Production.json
 Api/Psx.Api/bin/
 Api/Psx.Api/obj/
 Api/Psx.Api/publish/
+Api/Psx.Api/publish-output/
 
 # macOS
 .DS_Store

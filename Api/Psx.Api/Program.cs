@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Caching.Memory;
 using Psx.Api.Data;
 using Psx.Api.Entities;
 using Psx.Api.Services;
@@ -17,6 +18,7 @@ builder.Services.AddDbContext<PsxDbContext>(options =>
         sql => sql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), errorNumbersToAdd: null)));
 
 builder.Services.AddSingleton<PsxSymbolDirectory>();
+builder.Services.AddMemoryCache();
 
 builder.Services.AddHttpClient<PsxHistoricalPriceService>(client =>
 {
@@ -508,8 +510,7 @@ prices.MapPost("/history", async (PriceHistoryRequest req, PsxHistoricalPriceSer
 // comment above for why this exists instead of the client fetching it directly via a
 // third-party CORS proxy. Returns the raw HTML unchanged; the frontend's existing
 // DOMParser-based table parsing (fetchPSXMarketWatch) is untouched, only the URL it
-// fetches from changed. Fetch/fallback logic lives in PsxHtmlFetcher (shared with the
-// dividend-announcement service below).
+// fetches from changed. Fetch/fallback logic lives in PsxHtmlFetcher.
 prices.MapGet("/market-watch", async (IHttpClientFactory httpFactory) =>
 {
     var client = httpFactory.CreateClient();
@@ -526,6 +527,31 @@ prices.MapGet("/indices", async (IHttpClientFactory httpFactory) =>
     client.Timeout = TimeSpan.FromSeconds(20);
     var html = await PsxHtmlFetcher.FetchAsync(client, "indices");
     return html is not null ? Results.Content(html, "text/html") : Results.StatusCode(StatusCodes.Status502BadGateway);
+});
+
+// PSX's per-company profile page (Business Description, Key People, P/E, Market Cap, EPS/
+// Sales/Profit financials) - feeds the Share Information overlay. Cached server-side
+// (6h) unlike market-watch/indices: fundamentals don't move intraday, so re-scraping PSX
+// on every click (from every user, every reopen) would be pure waste against an edge
+// that's already shown flakiness under load. Symbol is restricted to alphanumerics -
+// this proxies directly to a PSX path built from it, so an unvalidated value would make
+// this an open fetch-anything-from-dps.psx.com.pk proxy.
+prices.MapGet("/company/{symbol}", async (string symbol, IHttpClientFactory httpFactory, IMemoryCache cache) =>
+{
+    if (!Regex.IsMatch(symbol, "^[A-Za-z0-9]+$")) return Results.BadRequest();
+    var sym = symbol.ToUpperInvariant();
+
+    var cacheKey = $"company-profile:{sym}";
+    if (cache.TryGetValue(cacheKey, out string? cached) && cached is not null)
+        return Results.Content(cached, "text/html");
+
+    var client = httpFactory.CreateClient();
+    client.Timeout = TimeSpan.FromSeconds(20);
+    var html = await PsxHtmlFetcher.FetchAsync(client, $"company/{sym}");
+    if (html is null) return Results.StatusCode(StatusCodes.Status502BadGateway);
+
+    cache.Set(cacheKey, html, TimeSpan.FromHours(6));
+    return Results.Content(html, "text/html");
 });
 
 // ── CASH LEDGER ───────────────────────────────────────────────────────

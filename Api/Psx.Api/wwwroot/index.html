@@ -191,6 +191,16 @@ a{color:var(--accent);text-decoration:none}
   border:1px solid rgba(26,86,219,.2);
 }
 
+/* Chart time-range selector (1M/6M/YTD/1Y/3Y/5Y), PSX-style segmented control. */
+.range-toggle{display:flex;gap:4px;flex-wrap:wrap}
+.range-btn{
+  font-size:11px;font-family:var(--mono);padding:4px 10px;cursor:pointer;
+  background:var(--elevated);border:1px solid var(--border);border-radius:20px;color:var(--txt2);
+  transition:background .15s,color .15s,border-color .15s;
+}
+.range-btn:hover{border-color:var(--accent)}
+.range-btn.active{background:var(--accent-bg);color:var(--accent);border-color:rgba(26,86,219,.3);font-weight:700}
+
 /* ── TABLE ───────────────────────────────────────────────────── */
 .tbl-wrap{overflow-x:auto;border-radius:var(--r2);border:1px solid var(--border2);box-shadow:0 1px 4px rgba(13,24,41,.06)}
 .tbl{font-size:13px}
@@ -211,6 +221,27 @@ a{color:var(--accent);text-decoration:none}
 .tbl tbody tr.row-red{background:rgba(185,28,28,.04)}
 .tbl td{padding:10px 12px;font-family:var(--mono);font-size:12px;text-align:right;vertical-align:middle}
 .tbl td:first-child,.tbl td:nth-child(2){text-align:left;font-family:var(--ui)}
+/* Wide enough that the vertical High/Latest/Low component's track+labels never wrap. */
+.mkt-price-col{min-width:130px}
+/* .vrange is a block-level flex container that fills the cell's full width - text-align
+   on the <td> only affects inline content (the plain-price/"No price" fallback below,
+   when there's no range yet), so the flex content itself needs its own flex-end to
+   land on the right edge and actually match the table's other numeric columns. */
+.vrange{display:flex;align-items:center;justify-content:flex-end;gap:10px}
+.vrange-latest{font-family:var(--mono);font-weight:700;font-size:14px;color:var(--txt)}
+.vrange-latest.pos{color:var(--green)}
+.vrange-latest.neg{color:var(--red)}
+.vrange-track-wrap{display:flex;flex-direction:column;align-items:center;gap:3px}
+.vrange-track-wrap span{font-family:var(--mono);font-size:10px;color:var(--txt3);line-height:1}
+.vrange-track{position:relative;width:5px;height:44px;background:var(--border2);border-radius:99px}
+.vrange-track-fill{position:absolute;inset:0;border-radius:99px;background:linear-gradient(180deg,var(--border),var(--txt3));opacity:.5}
+.vrange-dot{
+  position:absolute;left:50%;width:10px;height:10px;border-radius:50%;
+  background:var(--card);border:2.5px solid var(--accent);transform:translate(-50%,50%);
+  box-shadow:0 1px 3px rgba(13,24,41,.25);
+}
+.vrange-dot.pos{border-color:var(--green)}
+.vrange-dot.neg{border-color:var(--red)}
 .tbl .sym{font-weight:700;font-size:13px;color:var(--txt)}
 .tbl .sector-tag{
   font-size:10px;padding:2px 7px;border-radius:20px;
@@ -300,6 +331,10 @@ a{color:var(--accent);text-decoration:none}
   margin:auto;
 }
 .modal-backdrop.open .modal{transform:none}
+/* Share Information overlay is content-heavy (chart + fundamentals + financials +
+   profile) - wide enough to feel like its own page, scoped to this one modal only so
+   every other (form-style) modal keeps its normal 520px width. */
+.modal.modal--fullpage{max-width:960px}
 .modal-hd{
   display:flex;align-items:center;justify-content:space-between;
   padding:16px 20px;border-bottom:1px solid var(--border2);
@@ -517,6 +552,7 @@ a{color:var(--accent);text-decoration:none}
     <div class="kpi-label">KSE-100 Index</div>
     <div class="kpi-val" id="kv-index">—</div>
     <div class="kpi-sub" id="kv-index-chg">—</div>
+    <div class="kpi-sub" id="kv-index-range" style="color:var(--txt3)">—</div>
   </div>
   <div class="kpi-card" id="kpiPortValue">
     <div class="kpi-label">Portfolio Value</div>
@@ -592,7 +628,7 @@ a{color:var(--accent);text-decoration:none}
           <th>Sector</th>
           <th>Shares</th>
           <th>Avg Cost</th>
-          <th>Mkt Price</th>
+          <th class="mkt-price-col">Mkt Price</th>
           <th>Day Chg</th>
           <th>Cost Basis</th>
           <th>Mkt Value</th>
@@ -1033,6 +1069,22 @@ a{color:var(--accent);text-decoration:none}
     </div>
     <div class="modal-ft">
       <button class="btn" onclick="closeSymbolDetailModal()">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── SHARE INFORMATION OVERLAY ──────────────────────────────── -->
+<div class="modal-backdrop" id="shareInfoBackdrop" onclick="if(event.target===this) closeShareInfoModal()">
+  <div class="modal modal--fullpage">
+    <div class="modal-hd">
+      <div class="modal-title" id="shareInfoTitle">Share Information</div>
+      <button class="btn btn-icon btn-sm" onclick="closeShareInfoModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div id="shareInfoBody"></div>
+    </div>
+    <div class="modal-ft">
+      <button class="btn" onclick="closeShareInfoModal()">Close</button>
     </div>
   </div>
 </div>
@@ -2062,6 +2114,8 @@ function getEnrichedHoldings() {
       ? (unrealizedPL / h.totalCost) * 100 : null;
     const dayChange = p && p.change != null ? p.change * h.shares : null;
     const dayChangePct = p && p.changePct != null ? p.changePct : null;
+    const dayHigh = p ? p.high : null;
+    const dayLow = p ? p.low : null;
 
     if (mktValue != null) totalMktValue += mktValue;
     else totalMktValue += h.totalCost;
@@ -2079,6 +2133,8 @@ function getEnrichedHoldings() {
       returnPct,
       dayChange,
       dayChangePct,
+      dayHigh,
+      dayLow,
       priceStatus: p ? p.status : 'none',
       priceUpdatedAt: p ? p.updatedAt : null,
     });
@@ -2119,11 +2175,20 @@ function parseMarketWatchHtml(html, wanted) {
     if (cells.length < 10) continue;
     const sym = (cells[0].getAttribute('data-search') || cells[0].textContent).trim().toUpperCase();
     if (!wanted.has(sym)) continue;
+    // Columns confirmed against the live page's own <thead>: SYMBOL/SECTOR/LISTED IN/
+    // LDCP/OPEN/HIGH/LOW/CURRENT/CHANGE/CHANGE(%)/VOLUME - High/Low are today's
+    // session range, same data-order convention as price/change.
+    const high = parseFloat(cells[5].getAttribute('data-order'));
+    const low = parseFloat(cells[6].getAttribute('data-order'));
     const price = parseFloat(cells[7].getAttribute('data-order'));
     const change = parseFloat(cells[8].getAttribute('data-order'));
     const changePct = parseFloat(cells[9].getAttribute('data-order'));
     if (price > 0) {
-      results[sym] = { price, change: change || 0, changePct: changePct || 0, status: 'live', updatedAt: Date.now() };
+      results[sym] = {
+        price, change: change || 0, changePct: changePct || 0,
+        high: high > 0 ? high : null, low: low > 0 ? low : null,
+        status: 'live', updatedAt: Date.now()
+      };
     }
   }
   return results;
@@ -2162,10 +2227,12 @@ async function fetchPSXMarketWatch(symbols) {
 
 // PSX's /indices page (separate from market-watch) carries KSE100 and friends in a
 // server-rendered table, one row per index, identified by a data-code attribute rather
-// than by visible text - Current/Change/%Change are columns 3/4/5, same data-order
-// convention as the market-watch table. This "last market day change" reflects
-// whatever session PSX most recently closed/is running - there's no separate
-// "yesterday vs today" distinction to make here, PSX's own Change column already means that.
+// than by visible text - columns are Index/High/Low/Current/Change/%Change (confirmed
+// against the live page's own <thead>), same data-order convention as the market-watch
+// table. This "last market day change" reflects whatever session PSX most recently
+// closed/is running - there's no separate "yesterday vs today" distinction to make
+// here, PSX's own Change column already means that. High/Low are that same session's
+// intraday range, not a multi-day figure.
 function parseIndexHtml(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const link = doc.querySelector('a[data-code="KSE100"]');
@@ -2173,11 +2240,17 @@ function parseIndexHtml(html) {
   if (!row) return null;
   const cells = row.querySelectorAll('td');
   if (cells.length < 6) return null;
+  const high = parseFloat(cells[1].getAttribute('data-order'));
+  const low = parseFloat(cells[2].getAttribute('data-order'));
   const value = parseFloat(cells[3].getAttribute('data-order'));
   const change = parseFloat(cells[4].getAttribute('data-order'));
   const changePct = parseFloat(cells[5].getAttribute('data-order'));
   if (!(value > 0)) return null;
-  return { value, change: change || 0, changePct: changePct || 0, updatedAt: Date.now() };
+  return {
+    value, change: change || 0, changePct: changePct || 0,
+    high: high > 0 ? high : null, low: low > 0 ? low : null,
+    updatedAt: Date.now()
+  };
 }
 
 async function fetchPSXIndex() {
@@ -2202,6 +2275,104 @@ async function fetchPSXIndex() {
     } catch(e) { continue; }
   }
   return null;
+}
+
+// PSX's per-company profile page (dps.psx.com.pk/company/{SYMBOL}) - Company Profile
+// and Equity Profile sections are label/value pairs (.item__head + next sibling,
+// .stats_label + .stats_value), not a fixed-column table like market-watch, so this
+// walks by label TEXT rather than position - resilient to PSX reordering these blocks,
+// unlike an index-based read. Confirmed against a real fetched page (OGDC) before
+// writing this, not guessed from the class names alone.
+function parseCompanyProfileHtml(html) {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+
+  const titleMeta = doc.querySelector('meta[property="og:title"]');
+  let name = titleMeta ? titleMeta.getAttribute('content') : (doc.querySelector('title')?.textContent || '');
+  name = name.replace(/\s*-\s*Stock quote for\s*/i, '').replace(/\s*-\s*Pakistan Stock Exchange.*$/i, '').trim();
+
+  // A list, not a label->value map - "Free Float" legitimately appears twice on the real
+  // page (once as a share count, once as a %), and a plain object would silently drop
+  // one of them on the second write.
+  const stats = [];
+  doc.querySelectorAll('.stats_item').forEach(item => {
+    const label = item.querySelector('.stats_label')?.textContent.trim();
+    const value = item.querySelector('.stats_value')?.textContent.trim();
+    if (label && value != null) stats.push({ label, value });
+  });
+  // isPct lets Free Float's two entries (a plain count vs "15.00%") disambiguate by
+  // filtering on the value's own shape rather than needing a second label to key off.
+  const findStat = (needle, isPct = null) => {
+    const match = stats.find(s =>
+      s.label.toLowerCase().includes(needle.toLowerCase()) &&
+      (isPct === null || s.value.includes('%') === isPct));
+    return match ? match.value : null;
+  };
+
+  const profile = {};
+  doc.querySelectorAll('.item__head').forEach(head => {
+    const label = head.textContent.trim();
+    const valueEl = head.nextElementSibling;
+    if (!valueEl) return;
+    if (valueEl.tagName === 'TABLE') {
+      profile[label] = [...valueEl.querySelectorAll('tbody tr')].map(tr => {
+        const cells = tr.querySelectorAll('td');
+        return { name: cells[0]?.textContent.trim() || '', title: cells[1]?.textContent.trim() || '' };
+      });
+    } else {
+      profile[label] = valueEl.textContent.trim();
+    }
+  });
+
+  // Annual financials: first <td> of each row is the line-item label (Sales/Profit after
+  // Taxation/EPS), remaining <td>s align 1:1 with the year headers.
+  let annualFinancials = [];
+  const annualTable = doc.querySelector('.tabs__panel[data-name="Annual"] table');
+  if (annualTable) {
+    const years = [...annualTable.querySelectorAll('thead th')].slice(1).map(th => th.textContent.trim());
+    const rows = {};
+    annualTable.querySelectorAll('tbody tr').forEach(tr => {
+      const cells = [...tr.querySelectorAll('td')];
+      const label = cells[0]?.textContent.trim();
+      if (!label) return;
+      rows[label] = cells.slice(1).map(td => td.textContent.trim());
+    });
+    annualFinancials = years.map((year, i) => ({
+      year,
+      sales: rows['Sales']?.[i] ?? null,
+      profit: rows['Profit after Taxation']?.[i] ?? null,
+      eps: rows['EPS']?.[i] ?? null,
+    }));
+  }
+
+  if (!name) return null;
+  return {
+    name,
+    description: profile['BUSINESS DESCRIPTION'] || null,
+    keyPeople: Array.isArray(profile['KEY PEOPLE']) ? profile['KEY PEOPLE'] : [],
+    address: profile['ADDRESS'] || null,
+    website: profile['WEBSITE'] || null,
+    registrar: profile['REGISTRAR'] || null,
+    auditor: profile['AUDITOR'] || null,
+    fiscalYearEnd: profile['Fiscal Year End'] || null,
+    marketCap: findStat('Market Cap'),
+    shares: findStat('Shares'),
+    freeFloat: findStat('Free Float', false),
+    freeFloatPct: findStat('Free Float', true),
+    peRatio: findStat('P/E Ratio'),
+    oneYearChangePct: findStat('1-Year Change'),
+    ytdChangePct: findStat('YTD Change'),
+    annualFinancials,
+  };
+}
+
+async function fetchPSXCompanyProfile(symbol) {
+  try {
+    const res = await fetch(`/api/prices/company/${encodeURIComponent(symbol)}`, { credentials: 'include', signal: AbortSignal.timeout(20000) });
+    if (!res.ok) return null;
+    return parseCompanyProfileHtml(await res.text());
+  } catch(e) {
+    return null;
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -3096,7 +3267,7 @@ async function refreshPrices(silent = false) {
 
   // Everything below can throw (network, parsing, or a downstream render error) - if it
   // does, we must still release the isFetching latch and restore the button/spinner,
-  // otherwise every future refresh (manual or the 60s auto-tick) silently no-ops forever.
+  // otherwise every future refresh (manual or the auto-tick) silently no-ops forever.
   try {
     // PSX market-watch covers every symbol in one request
     try {
@@ -3138,9 +3309,9 @@ async function refreshPrices(silent = false) {
     isFetching = false;
   }
 
-  // The automatic once-a-minute tick stays quiet - the status dot and "last updated"
-  // time already give visual confirmation without a toast firing every 60 seconds.
-  // The manual Refresh button always reports back, since that's an explicit action.
+  // The automatic tick stays quiet - the status dot and "last updated" time already
+  // give visual confirmation without a toast firing on every cycle. The manual Refresh
+  // button always reports back, since that's an explicit action.
   if (silent) return;
 
   if (fetched > 0) {
@@ -3193,6 +3364,8 @@ function renderKPIs() {
     setText('kv-index', fNum(state.index.value));
     setText('kv-index-chg', `${fPKR(state.index.change, true)} (${fPct(state.index.changePct, true)})`);
     colorKPI('kpiIndex', state.index.change);
+    setText('kv-index-range', (state.index.low != null && state.index.high != null)
+      ? `Day: ${fNum(state.index.low)} – ${fNum(state.index.high)}` : '—');
   }
 
   // Method label
@@ -3242,6 +3415,30 @@ function renderSignalCell(symbol) {
 /* ══════════════════════════════════════════════════════
    RENDER — HOLDINGS TABLE
 ══════════════════════════════════════════════════════ */
+// Mkt Price cell: plain price when the day's high/low isn't known yet, otherwise a
+// vertical High/Latest/Low indicator - the Latest number IS the market price here,
+// not a separate figure, so this fully replaces the plain-price rendering rather than
+// sitting next to it. Dot position is clamped to [0,100] and high===low (no intraday
+// movement recorded yet) falls back to a centered dot instead of a div-by-zero NaN.
+function renderMktPriceCell(h) {
+  if (h.mktPrice == null) return '<span class="val-neu">No price</span>';
+  if (h.dayLow == null || h.dayHigh == null || h.dayHigh <= h.dayLow) return fPKR(h.mktPrice);
+
+  const pct = h.dayHigh > h.dayLow
+    ? Math.min(100, Math.max(0, (h.mktPrice - h.dayLow) / (h.dayHigh - h.dayLow) * 100))
+    : 50;
+  const dir = h.dayChange != null ? (h.dayChange >= 0 ? 'pos' : 'neg') : '';
+
+  return `<div class="vrange">
+    <span class="vrange-latest ${dir}">${fPKR(h.mktPrice)}</span>
+    <div class="vrange-track-wrap">
+      <span>${fPKR(h.dayHigh)}</span>
+      <div class="vrange-track"><div class="vrange-track-fill"></div><div class="vrange-dot ${dir}" style="bottom:${pct.toFixed(1)}%"></div></div>
+      <span>${fPKR(h.dayLow)}</span>
+    </div>
+  </div>`;
+}
+
 function renderHoldingsTable() {
   const { holdings } = getEnrichedHoldings();
   const tbody = document.getElementById('holdingsTbody');
@@ -3300,12 +3497,12 @@ function renderHoldingsTable() {
 
     return `<tr class="${rowClass}">
       <td style="text-align:left">
-        <span class="sym">${escapeHtml(h.symbol)}</span>${statusHtml}
+        <span class="sym" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" onclick="openShareInfoModal('${escapeForJsAttr(h.symbol)}')" title="View company information">${escapeHtml(h.symbol)}</span>${statusHtml}
       </td>
       <td style="text-align:left"><span class="sector-tag">${escapeHtml(h.sector)||'—'}</span></td>
       <td>${fNum(h.shares)}</td>
       <td>${fPKR(h.avgCost)}</td>
-      <td>${h.mktPrice != null ? fPKR(h.mktPrice) : '<span class="val-neu">No price</span>'}</td>
+      <td class="mkt-price-col">${renderMktPriceCell(h)}</td>
       <td>${dayHtml}</td>
       <td>${fPKR(h.totalCost)}</td>
       <td>${fPKR(h.mktValue)}</td>
@@ -3888,6 +4085,209 @@ function openSymbolDetailModal(symbol) {
 
 function closeSymbolDetailModal() {
   document.getElementById('symbolDetailBackdrop').classList.remove('open');
+}
+
+// Share Information overlay - company profile/fundamentals/EPS (fetchPSXCompanyProfile)
+// plus a historic price chart (state.priceHistory, same source as the Cumulative P&L
+// chart). Two independent data sources on purpose: a company-profile fetch failure
+// (PSX 502, symbol not found, etc.) still lets the price chart render if that data's
+// already cached, rather than the whole overlay going blank on one failure.
+const SHARE_INFO_RANGES = ['1M', '6M', 'YTD', '1Y', '3Y', '5Y'];
+let shareInfoSymbol = null;
+let shareInfoRange = '1Y';
+
+// Cutoff date (inclusive) for each range button, matching PSX's own chart convention.
+// state.priceHistory already holds the symbol's FULL cached history (fetched once by
+// loadPriceHistory, same series the Cumulative P&L chart uses) - switching ranges is
+// just filtering that in memory, never a re-fetch.
+function rangeStartDate(range) {
+  const d = new Date();
+  switch (range) {
+    case '1M': d.setMonth(d.getMonth() - 1); break;
+    case '6M': d.setMonth(d.getMonth() - 6); break;
+    case 'YTD': return `${d.getFullYear()}-01-01`;
+    case '1Y': d.setFullYear(d.getFullYear() - 1); break;
+    case '3Y': d.setFullYear(d.getFullYear() - 3); break;
+    case '5Y': d.setFullYear(d.getFullYear() - 5); break;
+    default: return null;
+  }
+  return d.toISOString().split('T')[0];
+}
+
+function openShareInfoModal(symbol) {
+  shareInfoSymbol = symbol;
+  shareInfoRange = '1Y';
+  document.getElementById('shareInfoTitle').textContent = symbol.toUpperCase();
+  document.getElementById('shareInfoBody').innerHTML = `
+    <div class="empty-state"><div class="es-icon">⏳</div><p>Loading company information…</p></div>`;
+  document.getElementById('shareInfoBackdrop').classList.add('open');
+  renderShareInfoModal(symbol);
+}
+
+function closeShareInfoModal() {
+  document.getElementById('shareInfoBackdrop').classList.remove('open');
+  destroyChart('shareInfoChart');
+  shareInfoSymbol = null;
+}
+
+function setShareInfoChartRange(range) {
+  shareInfoRange = range;
+  document.querySelectorAll('.range-btn').forEach(btn => btn.classList.toggle('active', btn.dataset.range === range));
+  renderShareInfoChart();
+}
+
+// Draws (or redraws, on a range change) just the chart - independent of the company
+// profile fetch, so switching 1M/6M/YTD/1Y/3Y/5Y never re-hits the network.
+function renderShareInfoChart() {
+  const canvas = document.getElementById('shareInfoChart');
+  if (!canvas || !shareInfoSymbol) return;
+  const full = state.priceHistory[shareInfoSymbol] || [];
+  const startDate = rangeStartDate(shareInfoRange);
+  const series = startDate ? full.filter(pt => pt.date >= startDate) : full;
+
+  destroyChart('shareInfoChart');
+  if (series.length === 0) return;
+  chartInstances.shareInfoChart = new Chart(canvas, {
+    type: 'line',
+    data: {
+      labels: series.map(pt => pt.date),
+      datasets: [{
+        data: series.map(pt => pt.close),
+        borderColor: '#1a56db',
+        backgroundColor: 'rgba(26,86,219,.06)',
+        fill: true, tension: 0.2, pointRadius: 0, borderWidth: 2,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: { callbacks: { label: ctx => ` PKR ${fPKR(ctx.raw)}` } }
+      },
+      scales: {
+        x: axisStyle({ ticks: { color:'#64748b', font:CHART_DEFAULTS.mono, maxTicksLimit:8 } }),
+        y: axisStyle()
+      }
+    }
+  });
+}
+
+async function renderShareInfoModal(symbol) {
+  const [profile] = await Promise.all([
+    fetchPSXCompanyProfile(symbol),
+    loadPriceHistory([symbol]),
+  ]);
+
+  // The overlay may have been closed (or reopened for a different symbol) while these
+  // fetches were in flight - a stale response landing after the fact must not clobber
+  // whatever's showing now.
+  if (!document.getElementById('shareInfoBackdrop').classList.contains('open')) return;
+  if (document.getElementById('shareInfoTitle').textContent !== symbol.toUpperCase()) return;
+
+  const body = document.getElementById('shareInfoBody');
+  const p = state.prices[symbol];
+  const series = state.priceHistory[symbol] || [];
+
+  const priceHeaderHtml = p
+    ? `<span class="mono" style="font-size:20px;font-weight:700">${fPKR(p.price)}</span>
+       <span class="${p.change >= 0 ? 'val-pos' : 'val-neg'}" style="margin-left:8px">${fPKR(p.change, true)} (${fPct(p.changePct, true)})</span>
+       ${p.high != null && p.low != null ? `<span class="val-neu" style="margin-left:8px;font-size:11px">Day: ${fPKR(p.low)}–${fPKR(p.high)}</span>` : ''}`
+    : '<span class="val-neu">No live price</span>';
+
+  const rangeToggleHtml = `
+    <div class="range-toggle" style="margin-bottom:8px">
+      ${SHARE_INFO_RANGES.map(r => `<span class="range-btn${r === shareInfoRange ? ' active' : ''}" data-range="${r}" onclick="setShareInfoChartRange('${r}')">${r}</span>`).join('')}
+    </div>`;
+
+  const chartHtml = series.length
+    ? `${rangeToggleHtml}<div class="chart-body" style="height:260px;margin-bottom:16px"><canvas id="shareInfoChart"></canvas></div>`
+    : `<div class="empty-state" style="padding:20px"><p>No historic price data available for this symbol yet.</p></div>`;
+
+  const profileHtml = profile ? renderCompanyProfileHtml(profile) : `
+    <div class="empty-state" style="padding:20px">
+      <p>Couldn't load company information from PSX right now. Try again shortly.</p>
+    </div>`;
+
+  body.innerHTML = `
+    <div class="form-group full" style="margin-bottom:4px">
+      <div style="font-size:17px;font-weight:700">${escapeHtml(profile?.name || symbol.toUpperCase())}</div>
+      <div style="margin-top:4px">${priceHeaderHtml}</div>
+    </div>
+    ${chartHtml}
+    ${profileHtml}`;
+
+  renderShareInfoChart();
+}
+
+// Renders the parsed PSX company-profile DTO (see parseCompanyProfileHtml) - a
+// fundamentals strip, the annual EPS/Sales/Profit table, then the descriptive profile
+// (business description, key people, address/website/registrar/auditor).
+function renderCompanyProfileHtml(d) {
+  const stat = (label, value) => `
+    <div class="rpnl-item">
+      <div class="rpnl-lbl">${escapeHtml(label)}</div>
+      <div class="rpnl-val mono" style="font-size:14px">${value != null ? escapeHtml(value) : '—'}</div>
+    </div>`;
+
+  const financialsHtml = d.annualFinancials.length ? `
+    <div class="tbl-wrap" style="margin-top:16px">
+      <table class="tbl">
+        <thead><tr>
+          <th style="text-align:left">Fiscal Year</th>
+          ${d.annualFinancials.map(f => `<th>${escapeHtml(f.year)}</th>`).join('')}
+        </tr></thead>
+        <tbody>
+          <tr><td style="text-align:left">EPS</td>${d.annualFinancials.map(f => `<td>${f.eps != null ? escapeHtml(f.eps) : '—'}</td>`).join('')}</tr>
+          <tr><td style="text-align:left">Profit after Tax (000s)</td>${d.annualFinancials.map(f => `<td>${f.profit != null ? escapeHtml(f.profit) : '—'}</td>`).join('')}</tr>
+          <tr><td style="text-align:left">Sales (000s)</td>${d.annualFinancials.map(f => `<td>${f.sales != null ? escapeHtml(f.sales) : '—'}</td>`).join('')}</tr>
+        </tbody>
+      </table>
+    </div>` : '';
+
+  const keyPeopleHtml = d.keyPeople.length
+    ? d.keyPeople.map(kp => `<div>${escapeHtml(kp.name)} <span class="val-neu" style="font-size:11px">— ${escapeHtml(kp.title)}</span></div>`).join('')
+    : '<span class="val-neu">—</span>';
+
+  return `
+    <div class="rpnl-summary" style="margin-top:8px;flex-wrap:wrap">
+      ${stat('P/E Ratio (TTM)', d.peRatio)}
+      ${stat('Market Cap (000s)', d.marketCap)}
+      ${stat('Free Float', d.freeFloat)}
+      ${stat('Free Float %', d.freeFloatPct)}
+      ${stat('1-Year Change', d.oneYearChangePct)}
+      ${stat('YTD Change', d.ytdChangePct)}
+    </div>
+    ${financialsHtml}
+    <div class="form-group full" style="margin-top:16px">
+      <div class="item__head" style="font-size:11px;color:var(--txt3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Business Description</div>
+      <p style="font-size:13px;color:var(--txt2);line-height:1.5">${escapeHtml(d.description) || '—'}</p>
+    </div>
+    <div class="form-grid" style="margin-top:12px">
+      <div class="form-group">
+        <div class="item__head" style="font-size:11px;color:var(--txt3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Key People</div>
+        <div style="font-size:13px">${keyPeopleHtml}</div>
+      </div>
+      <div class="form-group">
+        <div class="item__head" style="font-size:11px;color:var(--txt3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Address</div>
+        <div style="font-size:13px;color:var(--txt2)">${escapeHtml(d.address) || '—'}</div>
+      </div>
+      <div class="form-group">
+        <div class="item__head" style="font-size:11px;color:var(--txt3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Website</div>
+        <div style="font-size:13px">${d.website ? `<a href="${escapeHtml(d.website)}" target="_blank" rel="noopener">${escapeHtml(d.website)}</a>` : '—'}</div>
+      </div>
+      <div class="form-group">
+        <div class="item__head" style="font-size:11px;color:var(--txt3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Registrar</div>
+        <div style="font-size:13px;color:var(--txt2)">${escapeHtml(d.registrar) || '—'}</div>
+      </div>
+      <div class="form-group">
+        <div class="item__head" style="font-size:11px;color:var(--txt3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Auditor</div>
+        <div style="font-size:13px;color:var(--txt2)">${escapeHtml(d.auditor) || '—'}</div>
+      </div>
+      <div class="form-group">
+        <div class="item__head" style="font-size:11px;color:var(--txt3);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Fiscal Year End</div>
+        <div style="font-size:13px;color:var(--txt2)">${escapeHtml(d.fiscalYearEnd) || '—'}</div>
+      </div>
+    </div>`;
 }
 
 function renderSymbolDetailModal(symbol) {
@@ -5607,13 +6007,15 @@ async function init() {
   loadPsxSymbols();
   checkImportLocalData();
 
-  // Live prices/index on load, then every minute - refreshPrices() already guards
-  // against overlapping runs via isFetching, so a slow call just gets skipped by the
-  // next tick rather than stacking up. silent=true suppresses the toast so a background
-  // tick doesn't interrupt the user every 60 seconds - the manual Refresh button (not
-  // silent) still reports back explicitly.
+  // Live prices/index on load, then every 15s - refreshPrices() already guards against
+  // overlapping runs via isFetching, so a slow call just gets skipped by the next tick
+  // rather than stacking up. silent=true suppresses the toast so a background tick
+  // doesn't interrupt the user every cycle - the manual Refresh button (not silent)
+  // still reports back explicitly. Kept well above PSX's actual data cadence (market
+  // ticks aren't sub-second) and conservative enough to avoid tripping their edge/WAF,
+  // which has already shown flakiness on full-page scrapes even at the old 60s pace.
   refreshPrices(true);
-  setInterval(() => refreshPrices(true), 60 * 1000);
+  setInterval(() => refreshPrices(true), 15 * 1000);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
