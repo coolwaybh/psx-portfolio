@@ -173,6 +173,12 @@ a{color:var(--accent);text-decoration:none}
 .kpi-badge.pos{background:var(--green-bg);color:var(--green)}
 .kpi-badge.neg{background:var(--red-bg);color:var(--red)}
 .kpi-badge.neu{background:var(--elevated);color:var(--txt2)}
+.kpi-badge.warn{background:var(--amber-bg);color:var(--amber)}
+.kpi-badge.mstat{margin-left:6px;font-size:10px;padding:1px 6px}
+.kpi-badge.mstat .mstat-dot{width:5px;height:5px;border-radius:50%;background:currentColor;display:inline-block}
+.kpi-badge.mstat.pos .mstat-dot{box-shadow:0 0 4px var(--green)}
+.kpi-label-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px}
+.kpi-label-row .kpi-label{margin-bottom:0}
 
 /* ── SECTION ─────────────────────────────────────────────────── */
 .section{padding:20px 20px 0}
@@ -549,7 +555,12 @@ a{color:var(--accent);text-decoration:none}
 <!-- ── KPI CARDS ──────────────────────────────────────────────── -->
 <div class="kpi-grid" id="kpiGrid">
   <div class="kpi-card" id="kpiIndex">
-    <div class="kpi-label">KSE-100 Index</div>
+    <div class="kpi-label-row">
+      <div class="kpi-label">KSE-100 Index</div>
+      <span class="kpi-badge mstat neu" id="marketStatusBadge" title="">
+        <span class="mstat-dot"></span><span id="marketStatusText">—</span>
+      </span>
+    </div>
     <div class="kpi-val" id="kv-index">—</div>
     <div class="kpi-sub" id="kv-index-chg">—</div>
     <div class="kpi-sub" id="kv-index-range" style="color:var(--txt3)">—</div>
@@ -2277,6 +2288,79 @@ async function fetchPSXIndex() {
   return null;
 }
 
+// ── MARKET STATUS (Open / Closed / Holiday) ─────────────────────
+// Pure client-side clock check against PSX's published trading calendar - PSX's
+// scraped pages (indices/market-watch) carry no session-state field of their own
+// (confirmed: only OHLC/change columns), so there's nothing to fetch here.
+//
+// Regular hours (PKT), per psx.com.pk/psx/exchange/general/trading-hours:
+//   Mon-Thu: pre-open 09:15, regular 09:32-15:30, post-close ends 15:50
+//   Fri:     session 1 pre-open 09:00, regular 09:17-12:00
+//            session 2 pre-open 14:15, regular 14:32-16:30, post-close ends 16:50
+// "Open" here spans each day's full pre-open-through-post-close window - simpler
+// than reporting five session phases, and still means "the market is in session."
+//
+// Holiday dates are PSX's published 2026 calendar (psx.com.pk/psx/exchange/general/
+// calendar-holidays, cross-checked Sep 2026) - Islamic-calendar dates (Eid-ul-Fitr,
+// Eid-ul-Azha, Ashura, Eid Milad-un-Nabi) are moon-sighting estimates PSX itself
+// flags as subject to revision, so re-verify against PSX's own notice each year and
+// update this list - there's no feed to pull it from automatically.
+const PSX_HOLIDAYS_2026 = new Set([
+  '2026-02-05', // Kashmir Day
+  '2026-03-20', // Juma-tul-Wida
+  '2026-03-21', '2026-03-22', '2026-03-23', // Eid-ul-Fitr (est.) / Pakistan Day (23rd)
+  '2026-05-01', // Labour Day
+  '2026-05-26', '2026-05-27', '2026-05-28', // Eid-ul-Azha (est.) / Youm-e-Takbeer (28th)
+  '2026-06-25', '2026-06-26', // Ashura (est.)
+  '2026-08-14', // Independence Day
+  '2026-08-25', // Eid Milad-un-Nabi (est.)
+  '2026-11-09', // Allama Iqbal Day
+  '2026-12-25', // Quaid-e-Azam Day / Christmas
+]);
+
+// Returns {status:'open'|'closed'|'holiday', label, detail}. All comparisons use
+// Asia/Karachi wall-clock time via Intl, independent of the viewer's own timezone -
+// a visitor browsing from outside Pakistan must see PSX's actual session state, not
+// their own local day/time.
+function getMarketStatus() {
+  const now = new Date();
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Karachi', weekday: 'short',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', hour12: false,
+  }).formatToParts(now).reduce((acc, p) => (acc[p.type] = p.value, acc), {});
+
+  const isoDate = `${parts.year}-${parts.month}-${parts.day}`;
+  const minutes = (parts.hour === '24' ? 0 : +parts.hour) * 60 + +parts.minute;
+  const weekday = parts.weekday; // 'Mon'..'Sun'
+
+  if (PSX_HOLIDAYS_2026.has(isoDate))
+    return { status: 'holiday', label: 'Holiday', detail: 'PSX market holiday' };
+
+  if (weekday === 'Sat' || weekday === 'Sun')
+    return { status: 'closed', label: 'Closed', detail: 'Weekend' };
+
+  const toMin = (h, m) => h * 60 + m;
+  const windows = weekday === 'Fri'
+    ? [[toMin(9, 0), toMin(12, 0)], [toMin(14, 15), toMin(16, 50)]]
+    : [[toMin(9, 15), toMin(15, 50)]];
+
+  const open = windows.some(([start, end]) => minutes >= start && minutes < end);
+  return open
+    ? { status: 'open', label: 'Open', detail: 'Trading session in progress' }
+    : { status: 'closed', label: 'Closed', detail: 'Outside trading hours' };
+}
+
+function renderMarketStatus() {
+  const badge = document.getElementById('marketStatusBadge');
+  const text = document.getElementById('marketStatusText');
+  if (!badge || !text) return;
+  const { status, label, detail } = getMarketStatus();
+  badge.className = 'kpi-badge mstat ' + (status === 'open' ? 'pos' : status === 'holiday' ? 'warn' : 'neu');
+  badge.title = detail + ' (PKT)';
+  text.textContent = label;
+}
+
 // PSX's per-company profile page (dps.psx.com.pk/company/{SYMBOL}) - Company Profile
 // and Equity Profile sections are label/value pairs (.item__head + next sibling,
 // .stats_label + .stats_value), not a fixed-column table like market-watch, so this
@@ -3332,6 +3416,7 @@ async function refreshPrices(silent = false) {
    RENDER — KPIs
 ══════════════════════════════════════════════════════ */
 function renderKPIs() {
+  renderMarketStatus();
   const { holdings, totalMktValue, totalCostBasis } = getEnrichedHoldings();
 
   const totalUnrealized = holdings.reduce((a, h) => a + (h.unrealizedPL || 0), 0);
@@ -6016,6 +6101,12 @@ async function init() {
   // which has already shown flakiness on full-page scrapes even at the old 60s pace.
   refreshPrices(true);
   setInterval(() => refreshPrices(true), 15 * 1000);
+
+  // Market status is a pure clock check (no fetch), so it's kept on its own short
+  // interval independent of price refreshes - it needs to flip promptly right at a
+  // session boundary (09:15, 12:00, 15:30, etc.) even if a price fetch is mid-flight
+  // or fails that cycle.
+  setInterval(renderMarketStatus, 30 * 1000);
 
   // Keyboard shortcuts
   document.addEventListener('keydown', e => {
