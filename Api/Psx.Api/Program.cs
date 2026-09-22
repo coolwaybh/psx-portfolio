@@ -5,6 +5,7 @@ using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Psx.Api.Data;
@@ -13,8 +14,21 @@ using Psx.Api.Services;
 
 var builder = WebApplication.CreateBuilder(args);
 
+// MonsterASP's Premium-tier SQL Server fails the pre-login TLS handshake outright under the
+// default Encrypt=Mandatory (confirmed after this account's DB was upgraded to Premium - same
+// failure mode already seen and fixed on the sibling MIS project). Forced here on the parsed
+// connection string, not just in appsettings.Production.json, because whatever the host's own
+// panel provides (env var, JSON, or otherwise) is not guaranteed to survive a re-deploy or a
+// panel-side connection-string reset the way a JSON edit alone would - this can't be silently
+// overridden by any single config source.
+var connectionStringBuilder = new SqlConnectionStringBuilder(builder.Configuration.GetConnectionString("Default"))
+{
+    Encrypt = false,
+    TrustServerCertificate = true,
+};
+
 builder.Services.AddDbContext<PsxDbContext>(options =>
-    options.UseSqlServer(builder.Configuration.GetConnectionString("Default"),
+    options.UseSqlServer(connectionStringBuilder.ConnectionString,
         sql => sql.EnableRetryOnFailure(maxRetryCount: 3, maxRetryDelay: TimeSpan.FromSeconds(5), errorNumbersToAdd: null)));
 
 builder.Services.AddSingleton<PsxSymbolDirectory>();

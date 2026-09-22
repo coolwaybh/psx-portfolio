@@ -284,6 +284,15 @@ a{color:var(--accent);text-decoration:none}
 }
 @media(max-width:1200px){.bottom-grid{grid-template-columns:1fr 1fr}}
 @media(max-width:900px){.bottom-grid{grid-template-columns:1fr}}
+/* Top Movers + Realized P&L only (Technical Signal Summary moved to its own full-width
+   .section below - a 3rd narrow column was exactly what squeezed its readability). */
+.bottom-grid-2{grid-template-columns:1fr 1fr}
+@media(max-width:900px){.bottom-grid-2{grid-template-columns:1fr}}
+/* Fixed-height, scrollable table body with a sticky header - matches the Technical
+   Signal Summary panel's own scroll pattern instead of relying only on the Show all/
+   Show less toggle, which could otherwise grow this panel to an unbounded height. */
+.rpnl-scroll{max-height:320px;overflow-y:auto}
+.rpnl-scroll thead th{position:sticky;top:0;background:#f0f4fa;z-index:1}
 
 /* ── MOVERS ──────────────────────────────────────────────────── */
 .movers-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
@@ -496,6 +505,7 @@ a{color:var(--accent);text-decoration:none}
 .signal-badge.buy {background:rgba(10,110,66,.10);color:var(--green);border:1px solid rgba(10,110,66,.25)}
 .signal-badge.hold{background:rgba(146,64,14,.08);color:var(--amber);border:1px solid rgba(146,64,14,.22)}
 .signal-badge.sell{background:rgba(185,28,28,.09);color:var(--red);  border:1px solid rgba(185,28,28,.22)}
+.signal-badge.trim{background:rgba(194,65,12,.10);color:#c2410c;     border:1px solid rgba(194,65,12,.25)}
 .signal-conf{display:flex;gap:2px;justify-content:center}
 .signal-conf span{width:6px;height:6px;border-radius:50%}
 .signal-conf.high  .dot1,.signal-conf.high  .dot2,.signal-conf.high  .dot3{background:currentColor}
@@ -728,7 +738,7 @@ a{color:var(--accent);text-decoration:none}
 </section>
 
 <!-- ── BOTTOM GRID ────────────────────────────────────────────── -->
-<div class="bottom-grid">
+<div class="bottom-grid bottom-grid-2">
   <!-- Top Movers -->
   <section>
     <div class="section-hd" style="margin-bottom:12px">
@@ -753,15 +763,17 @@ a{color:var(--accent);text-decoration:none}
     </div>
     <div id="realizedSection"></div>
   </section>
-
-  <!-- Technical Signal Summary -->
-  <section>
-    <div class="section-hd" style="margin-bottom:12px">
-      <div class="section-title">Technical Signal Summary</div>
-    </div>
-    <div id="analystSummary"></div>
-  </section>
 </div>
+
+<!-- ── TECHNICAL SIGNAL SUMMARY — full-width block, not squeezed into the 3-col grid
+     above, so per-symbol rationale (technical + fundamental) reads properly instead of
+     being clamped/cramped into a narrow column. ─────────────────────────────────── -->
+<section class="section" style="padding-top:20px">
+  <div class="section-hd" style="margin-bottom:12px">
+    <div class="section-title">Technical Signal Summary</div>
+  </div>
+  <div id="analystSummary"></div>
+</section>
 
 <!-- ── TRANSACTION LOG ────────────────────────────────────────── -->
 <section class="section" style="padding-top:20px;padding-bottom:40px">
@@ -1393,6 +1405,75 @@ const SAMPLE_PRICES = {};
  * Confidence reflects how much price history is available and how strongly the
  * trend/momentum readings agree with each other, not conviction in a thesis.
  */
+/*
+ * FUNDAMENTAL VIEW — a dated, manually-researched snapshot (earnings, sector news,
+ * analyst targets, sell-side coverage), NOT computed live like computeTechnicalSignal()
+ * above. This app has no fundamentals/earnings data feed, so unlike the technical
+ * signal this can't refresh itself — it's only as current as ASOF below and needs a
+ * fresh research pass to move forward. Built from a two-agent process on 2026-09-22:
+ * one pass researched each holding independently (live PSX prices + recent news/
+ * earnings per symbol), a second, separate pass fact-checked and adversarially audited
+ * that research (re-verified prices/claims, corrected one stale price, tightened two
+ * hedged calls, flagged sell-side targets treated inconsistently) before this was
+ * accepted. Keep both signals visibly distinct in the UI — this is a snapshot of
+ * someone's judgment on a date, not a formula, and should never be presented as if it
+ * carries the same "recomputed automatically" trust as the technical signal.
+ */
+const FUNDAMENTAL_VIEW_ASOF = '2026-09-22';
+const FUNDAMENTAL_VIEW = {
+  FFC:    { signal:'HOLD', conf:'medium', note:'~10x P/E, ~7.5% dividend yield — a yield play more than a growth story. Urea pricing stabilized by a 2026 ECC gas-allocation deal; no FFC-specific catalyst found.' },
+  OGDC:   { signal:'BUY',  conf:'medium', note:'Sector reserve-replacement >100%, EBITDAX growth ~8%/yr FY26-28, Reko Diq stake as long-term optionality. Analyst avg target ~392 (+26%).' },
+  LUCK:   { signal:'HOLD', conf:'medium', note:'FY26 EPS +15.7% YoY; went ex-div (Rs5) 17-Sep which mechanically pulled the price down. An 8-analyst ~612 target exists but is treated with the same skepticism as MLCF/PAEL’s bullish targets, not taken at face value.' },
+  MARI:   { signal:'HOLD', conf:'medium', note:'Same Oil&Gas E&P tailwinds as OGDC (sector profit ~Rs92bn 3QFY26). No MARI-specific catalyst found in this pass.' },
+  EFERT:  { signal:'HOLD', conf:'low',    note:'DAP prices elevated (import-dependent), urea stabilized by the gas deal. No company-specific earnings surfaced — this is a sector-proxy view, not company-verified.' },
+  SYS:    { signal:'HOLD', conf:'medium', note:'H1 2026 PAT +17% YoY, sales +35% (Confiz acquisition), APAC growth +85% — fundamentals look strong despite being the book’s worst price mover; reads as a valuation de-rating, not a business problem.' },
+  MLCF:   { signal:'HOLD', conf:'medium', note:'Cement dispatches +7.6% FY26. An 11-analyst ~152.50 target (+60%) is unusually optimistic for PSX sell-side and shouldn’t be taken at face value.' },
+  ENGROH: { signal:'HOLD', conf:'medium', note:'Formerly Dawood Hercules Corp — renamed Engro Holding Ltd Dec-2024, absorbed Engro Corp as a subsidiary Jan-2025 (confirmed via CCP-sanctioned Scheme of Arrangement). Now a diversified holding co, NOT a bank — the app’s own sector tag is stale. 2025 earnings +331% YoY looks merger-accounting driven; quality unverified.' },
+  MTL:    { signal:'HOLD', conf:'medium', note:'>60% tractor market share; new deal to export own-branded "Millat" tractors via Massey Ferguson. Price hikes effective May-2026.' },
+  FCCL:   { signal:'HOLD', conf:'medium', note:'Roughly at cost; rides the same cement-sector recovery as LUCK/MLCF.' },
+  ILP:    { signal:'BUY',  conf:'high',   note:'Interloop: 1HFY26 gross profit +23.5%, PBT jumped to Rs10.03bn from Rs1.64bn. New Adidas apparel supply deal; benefiting from US/EU sourcing shift to Asia.' },
+  PAEL:   { signal:'HOLD', conf:'low',    note:'Higher-risk than the other Holds: down 12.8% with the Sep-2 CY26 earnings outcome unconfirmed and only 3 analysts covering it. CY25 fundamentals (+65.5% earnings) were solid, but recent evidence is thin — don’t add here.' },
+  SLM:    { signal:'HOLD', conf:'medium', note:'Service Long March Tyres — IPO’d Jun-2026, capacity raised 25% to 2M tyres/yr, passenger-tyre plant planned by 2028. Still under 4 months of trading history; thin coverage.' },
+  SPSL:   { signal:'TRIM', conf:'low',    note:'Sitara Petroleum — IPO’d 21-May-2026 at 18.90, still trading below that IPO price with no offsetting catalyst found. The underperformance itself is the signal. Check your CGT holding-period exposure before trimming — this was bought at the IPO, ~4 months ago.' },
+  HUBC:   { signal:'HOLD', conf:'medium', note:'Rs5/share dividend declared (book closure 13-Oct); diversifying into Thar coal (Thar Energy, ThalNova), which typically slips on Pakistani power-project timelines. Sector-wide circular debt (~Rs1.6trn) remains a standing risk.' },
+};
+
+// Portfolio-level flags from the same research+audit pass — not per-symbol, shown once
+// above the list. Concentration % independently re-verified against the prices/shares
+// actually in FUNDAMENTAL_VIEW's source pass; PKR/liquidity/CGT points were gaps the
+// audit pass found the research pass had missed, not things the technical signal
+// (price-only) could ever surface on its own.
+const FUNDAMENTAL_PORTFOLIO_NOTE = 'Fertilizer + Oil&Gas + Cement together were ~76% of the book on ' + FUNDAMENTAL_VIEW_ASOF + ' — a real sector-cluster concentration (independently verified), and one that shares the same macro exposure (PKR, gas/energy policy, subsidies) across all three, not three genuinely separate bets. Also unaddressed by price-only signals: PKR currency risk on the import-linked names (FFC/EFERT/cement), liquidity/slippage risk on thin-float names (SLM, SPSL, the 100-share HUBC stub), and CGT holding-period exposure on any near-term trim.';
+
+// The "Refresh" button below can't call a live research pipeline from inside this static
+// page - a raw LLM API call with no web/market-data access would just hallucinate Sep-2026
+// PSX prices and news, which is worse than a clearly-dated stale view. So it hands the user
+// a ready-to-paste request instead, describing exactly the two-pass process that produced
+// FUNDAMENTAL_VIEW above (one pass researches each holding with live web access, a second,
+// independent pass fact-checks and adversarially audits the first before anything is
+// accepted) - see this file's own FUNDAMENTAL_VIEW comment for the full description.
+const FUNDAMENTAL_VIEW_REFRESH_PROMPT =
+  'Refresh the Fundamental View in the PSX app (Api/Psx.Api/wwwroot/index.html): pull my current holdings from the live DB (same as before), ' +
+  'run an independent research pass (live PSX prices + recent news/earnings per symbol) and a second, separate audit pass that fact-checks it, ' +
+  'then update FUNDAMENTAL_VIEW, FUNDAMENTAL_VIEW_ASOF, and FUNDAMENTAL_PORTFOLIO_NOTE in index.html with the new dated snapshot.';
+
+function daysSince(isoDate) {
+  const ms = Date.now() - new Date(isoDate + 'T00:00:00').getTime();
+  return Math.max(0, Math.floor(ms / 86400000));
+}
+
+// Clipboard write needs a secure context and can be denied by the browser - falls back to
+// a plain prompt() (still copyable via Ctrl/Cmd+A, C) so the button always does SOMETHING
+// useful rather than failing silently.
+async function refreshFundamentalView() {
+  try {
+    await navigator.clipboard.writeText(FUNDAMENTAL_VIEW_REFRESH_PROMPT);
+    toast('Refresh request copied — paste it into a Claude Code session on this project to get a fresh, dated, independently-audited snapshot.', 'success', 6000);
+  } catch (e) {
+    window.prompt('Copy this and paste it into a Claude Code session on this project:', FUNDAMENTAL_VIEW_REFRESH_PROMPT);
+  }
+}
+
 function computeTechnicalSignal(symbol) {
   const series = state.priceHistory[symbol];
   if (!series || series.length < 20) return null; // not enough history loaded yet
@@ -3901,11 +3982,11 @@ function renderTopMovers() {
   const { holdings } = getEnrichedHoldings();
   const withReturn = holdings.filter(h => h.returnPct != null);
   const sorted = [...withReturn].sort((a,b) => b.returnPct - a.returnPct);
-  // Split by sign, not by position - slice(0,3)/slice(-3) overlap (and can mislabel a
-  // losing holding as a "gainer") whenever there are fewer than 6 priced holdings, e.g.
+  // Split by sign, not by position - slice(0,5)/slice(-5) overlap (and can mislabel a
+  // losing holding as a "gainer") whenever there are fewer than 10 priced holdings, e.g.
   // a single holding would appear as both the top gainer AND the top loser.
-  const gainers = sorted.filter(h => h.returnPct >= 0).slice(0, 3);
-  const losers  = sorted.filter(h => h.returnPct < 0).slice(-3).reverse();
+  const gainers = sorted.filter(h => h.returnPct >= 0).slice(0, 5);
+  const losers  = sorted.filter(h => h.returnPct < 0).slice(-5).reverse();
 
   function moverRow(h) {
     const cls = h.returnPct >= 0 ? 'val-pos' : 'val-neg';
@@ -3971,7 +4052,7 @@ function renderRealizedPL() {
         <div class="rpnl-val">${Object.keys(bySymbol).length}</div>
       </div>
     </div>
-    <div class="tbl-wrap">
+    <div class="tbl-wrap rpnl-scroll">
       <table class="tbl">
         <thead>
           <tr>
@@ -4575,6 +4656,12 @@ function renderAnalystSummary() {
   const sigIcon  = { BUY:'▲', HOLD:'◆', SELL:'▼' };
   const confLabel = { high:'High conviction', medium:'Moderate', low:'Low conviction' };
 
+  // Same palette idea, extended with TRIM for FUNDAMENTAL_VIEW (a milder "reduce" call
+  // than a full technical SELL, so it gets its own badge colour, not var(--red)).
+  const fundColor = { BUY:'var(--green)', HOLD:'var(--amber)', TRIM:'#c2410c' };
+  const fundIcon  = { BUY:'▲', HOLD:'◆', TRIM:'▽' };
+  const fundConfLabel = { high:'High conviction', medium:'Moderate', low:'Low conviction' };
+
   const rows = activeSymbols
     .map(sym => ({ sym, sig: computeTechnicalSignal(sym) }))
     .filter(r => r.sig)
@@ -4595,6 +4682,8 @@ function renderAnalystSummary() {
   const counts = { BUY: 0, HOLD: 0, SELL: 0 };
   rows.forEach(r => counts[r.sig.signal]++);
 
+  const fundCoveredUncovered = uncovered.filter(sym => FUNDAMENTAL_VIEW[sym]);
+
   el.innerHTML = `
     <div style="display:flex;gap:8px;margin-bottom:12px">
       ${['BUY','HOLD','SELL'].map(s =>
@@ -4604,30 +4693,69 @@ function renderAnalystSummary() {
         </div>`
       ).join('')}
     </div>
-    <div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto">
-      ${rows.map(r => `
-        <div style="display:flex;align-items:flex-start;gap:10px;padding:8px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid ${sigColor[r.sig.signal]}" title="${r.sig.rationale.replace(/'/g,"&#39;")}">
-          <div style="flex-shrink:0;min-width:44px">
-            <div style="font-weight:700;font-size:13px">${escapeHtml(r.sym)}</div>
-            <span class="signal-badge ${r.sig.signal.toLowerCase()}" style="margin-top:3px;font-size:9px;padding:1px 5px">${sigIcon[r.sig.signal]} ${r.sig.signal}</span>
-          </div>
-          <div style="flex:1;min-width:0">
-            <div style="font-size:10px;color:var(--txt2);line-height:1.4;overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical">
-              ${r.sig.rationale.split('.')[0]}.
+    ${(() => {
+      const age = daysSince(FUNDAMENTAL_VIEW_ASOF);
+      const ageColor = age > 30 ? 'var(--red)' : age > 14 ? 'var(--amber)' : 'var(--green)';
+      const ageText = age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`;
+      return `
+    <div style="margin-bottom:12px;padding:9px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid var(--amber)">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <div style="font-size:10px;font-weight:700;letter-spacing:.4px;color:var(--amber);text-transform:uppercase">Fundamental View — snapshot as of ${FUNDAMENTAL_VIEW_ASOF}</div>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:9px;font-weight:700;color:${ageColor}">${ageText}</span>
+          <button class="btn btn-sm" onclick="refreshFundamentalView()" title="Copies a ready-to-paste refresh request — ask Claude to research + independently audit a fresh snapshot">↻ Refresh</button>
+        </div>
+      </div>
+      <div style="font-size:10px;color:var(--txt2);line-height:1.5;margin-top:4px">${FUNDAMENTAL_PORTFOLIO_NOTE}</div>
+      <div style="font-size:9px;color:var(--txt3);margin-top:4px">Manually researched then independently fact-checked/audited — not recomputed automatically like the Technical Signal below. Click Refresh for a ready-to-paste request that regenerates it the same way.</div>
+    </div>`;
+    })()}
+    <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px">
+      ${rows.map(r => { const f = FUNDAMENTAL_VIEW[r.sym]; return `
+        <div style="display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:var(--elevated);border-radius:var(--r);border-left:2px solid ${sigColor[r.sig.signal]}">
+          <div style="display:flex;align-items:flex-start;gap:10px">
+            <div style="flex-shrink:0;min-width:44px">
+              <div style="font-weight:700;font-size:13px">${escapeHtml(r.sym)}</div>
+              <span class="signal-badge ${r.sig.signal.toLowerCase()}" style="margin-top:3px;font-size:9px;padding:1px 5px">${sigIcon[r.sig.signal]} ${r.sig.signal}</span>
             </div>
-            <div style="font-size:9px;color:var(--txt3);margin-top:3px">${confLabel[r.sig.conf]}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:10px;color:var(--txt2);line-height:1.5">
+                ${r.sig.rationale}
+              </div>
+              <div style="font-size:9px;color:var(--txt3);margin-top:3px">Technical · ${confLabel[r.sig.conf]}</div>
+            </div>
           </div>
-        </div>`
-      ).join('')}
+          ${f ? `
+          <div style="display:flex;align-items:flex-start;gap:10px;padding-top:6px;border-top:1px dashed var(--border)">
+            <div style="flex-shrink:0;min-width:44px">
+              <span class="signal-badge ${f.signal.toLowerCase()}" style="font-size:9px;padding:1px 5px">${fundIcon[f.signal]} ${f.signal}</span>
+            </div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:10px;color:var(--txt2);line-height:1.5">
+                ${f.note}
+              </div>
+              <div style="font-size:9px;color:var(--txt3);margin-top:3px">Fundamental · ${fundConfLabel[f.conf]}</div>
+            </div>
+          </div>` : ''}
+        </div>`; }).join('')}
     </div>
     ${uncovered.length ? `
     <div style="margin-top:10px;padding:8px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid var(--border2)">
       <div style="font-size:10px;color:var(--txt3);line-height:1.4">
-        Loading price history for: <span style="font-family:var(--mono);color:var(--txt2)">${uncovered.map(escapeHtml).join(', ')}</span> — signal appears once enough data arrives.
+        Loading price history for: <span style="font-family:var(--mono);color:var(--txt2)">${uncovered.map(escapeHtml).join(', ')}</span> — technical signal appears once enough data arrives.
       </div>
+      ${fundCoveredUncovered.length ? `
+      <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px">
+        ${fundCoveredUncovered.map(sym => { const f = FUNDAMENTAL_VIEW[sym]; return `
+        <div style="display:flex;align-items:center;gap:6px" title="${f.note.replace(/'/g,"&#39;")}">
+          <span style="font-size:10px;font-weight:700;min-width:44px">${escapeHtml(sym)}</span>
+          <span class="signal-badge ${f.signal.toLowerCase()}" style="font-size:9px;padding:1px 5px">${fundIcon[f.signal]} ${f.signal}</span>
+          <span style="font-size:9px;color:var(--txt3)">Fundamental view already available</span>
+        </div>`; }).join('')}
+      </div>` : ''}
     </div>` : ''}
     <div style="font-size:10px;color:var(--txt3);margin-top:10px;line-height:1.4">
-      Hover over any signal in the table or panel for the full computed rationale. Technical read only (trend/momentum from price history) — not fundamental analysis or financial advice.
+      Hover over any signal for its full rationale. Technical Signal (top of each card) is recomputed live from price history; Fundamental View (bottom of each card, dated ${FUNDAMENTAL_VIEW_ASOF}) is manual research and needs a fresh pass to update. Neither is financial advice.
     </div>`;
 }
 
