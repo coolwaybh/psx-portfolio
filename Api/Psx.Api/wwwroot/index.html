@@ -126,6 +126,9 @@ a{color:var(--accent);text-decoration:none}
 .status-dot.live{background:var(--green);box-shadow:0 0 6px var(--green)}
 .status-dot.fetching{background:var(--amber);animation:pulse 1s infinite}
 .header-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.market-ticker{font-family:var(--mono);font-size:12px;font-weight:600;padding:5px 10px;border-radius:var(--r);background:var(--elevated);border:1px solid var(--border);white-space:nowrap}
+.market-ticker .arrow{margin-right:2px}
+.refresh-timer{font-size:11px;color:var(--txt3);font-family:var(--mono);white-space:nowrap}
 
 /* ── BUTTONS ─────────────────────────────────────────────────── */
 .btn{
@@ -468,6 +471,7 @@ a{color:var(--accent);text-decoration:none}
   .charts-grid{grid-template-columns:1fr}
   .form-grid{grid-template-columns:1fr}
   .header-meta{display:none}
+  .market-ticker,.refresh-timer{display:none}
   .kpi-grid{grid-template-columns:repeat(2,1fr)}
   .settings-panel{width:100%}
   .movers-grid{grid-template-columns:1fr}
@@ -542,9 +546,9 @@ a{color:var(--accent);text-decoration:none}
     <span id="methodLabel" class="method-pill">WA Cost</span>
   </div>
   <div class="header-actions">
-    <button class="btn btn-sm" id="btnRefresh" onclick="refreshPrices()">
-      <span id="refreshIcon">↻</span> Refresh Prices
-    </button>
+    <span id="marketTicker" class="market-ticker" title="KSE-100, Pakistan Stock Exchange benchmark index"></span>
+    <span id="volumeTicker" class="market-ticker" title="Total shares traded across PSX today"></span>
+    <span id="refreshTimer" class="refresh-timer" title="Prices auto-refresh every 15 seconds"></span>
     <button class="btn btn-sm btn-primary" onclick="openModal()">
       + Add Transaction
     </button>
@@ -1406,72 +1410,124 @@ const SAMPLE_PRICES = {};
  * trend/momentum readings agree with each other, not conviction in a thesis.
  */
 /*
- * FUNDAMENTAL VIEW — a dated, manually-researched snapshot (earnings, sector news,
- * analyst targets, sell-side coverage), NOT computed live like computeTechnicalSignal()
- * above. This app has no fundamentals/earnings data feed, so unlike the technical
- * signal this can't refresh itself — it's only as current as ASOF below and needs a
- * fresh research pass to move forward. Built from a two-agent process on 2026-09-22:
- * one pass researched each holding independently (live PSX prices + recent news/
- * earnings per symbol), a second, separate pass fact-checked and adversarially audited
- * that research (re-verified prices/claims, corrected one stale price, tightened two
- * hedged calls, flagged sell-side targets treated inconsistently) before this was
- * accepted. Keep both signals visibly distinct in the UI — this is a snapshot of
- * someone's judgment on a date, not a formula, and should never be presented as if it
- * carries the same "recomputed automatically" trust as the technical signal.
+ * FUNDAMENTAL VIEW — live, per-symbol AI research (Claude + real-time web search),
+ * called through the backend (GET/POST /api/fundamental/{symbol}) rather than baked
+ * into this file. Cached server-side per symbol (shared by every user) so a repeat view
+ * is instant and free; a fresh ("Refresh") lookup costs a real API call, so the backend
+ * rate-limits it to one refresh per user per rolling 24h (admins unlimited). See
+ * openFundamentalPanel()/refreshFundamentalPanel() below and the "Fundamental Analysis"
+ * section rendered inside the Share Information overlay (renderShareInfoModal).
  */
-const FUNDAMENTAL_VIEW_ASOF = '2026-09-22';
-const FUNDAMENTAL_VIEW = {
-  FFC:    { signal:'HOLD', conf:'medium', note:'~10x P/E, ~7.5% dividend yield — a yield play more than a growth story. Urea pricing stabilized by a 2026 ECC gas-allocation deal; no FFC-specific catalyst found.' },
-  OGDC:   { signal:'BUY',  conf:'medium', note:'Sector reserve-replacement >100%, EBITDAX growth ~8%/yr FY26-28, Reko Diq stake as long-term optionality. Analyst avg target ~392 (+26%).' },
-  LUCK:   { signal:'HOLD', conf:'medium', note:'FY26 EPS +15.7% YoY; went ex-div (Rs5) 17-Sep which mechanically pulled the price down. An 8-analyst ~612 target exists but is treated with the same skepticism as MLCF/PAEL’s bullish targets, not taken at face value.' },
-  MARI:   { signal:'HOLD', conf:'medium', note:'Same Oil&Gas E&P tailwinds as OGDC (sector profit ~Rs92bn 3QFY26). No MARI-specific catalyst found in this pass.' },
-  EFERT:  { signal:'HOLD', conf:'low',    note:'DAP prices elevated (import-dependent), urea stabilized by the gas deal. No company-specific earnings surfaced — this is a sector-proxy view, not company-verified.' },
-  SYS:    { signal:'HOLD', conf:'medium', note:'H1 2026 PAT +17% YoY, sales +35% (Confiz acquisition), APAC growth +85% — fundamentals look strong despite being the book’s worst price mover; reads as a valuation de-rating, not a business problem.' },
-  MLCF:   { signal:'HOLD', conf:'medium', note:'Cement dispatches +7.6% FY26. An 11-analyst ~152.50 target (+60%) is unusually optimistic for PSX sell-side and shouldn’t be taken at face value.' },
-  ENGROH: { signal:'HOLD', conf:'medium', note:'Formerly Dawood Hercules Corp — renamed Engro Holding Ltd Dec-2024, absorbed Engro Corp as a subsidiary Jan-2025 (confirmed via CCP-sanctioned Scheme of Arrangement). Now a diversified holding co, NOT a bank — the app’s own sector tag is stale. 2025 earnings +331% YoY looks merger-accounting driven; quality unverified.' },
-  MTL:    { signal:'HOLD', conf:'medium', note:'>60% tractor market share; new deal to export own-branded "Millat" tractors via Massey Ferguson. Price hikes effective May-2026.' },
-  FCCL:   { signal:'HOLD', conf:'medium', note:'Roughly at cost; rides the same cement-sector recovery as LUCK/MLCF.' },
-  ILP:    { signal:'BUY',  conf:'high',   note:'Interloop: 1HFY26 gross profit +23.5%, PBT jumped to Rs10.03bn from Rs1.64bn. New Adidas apparel supply deal; benefiting from US/EU sourcing shift to Asia.' },
-  PAEL:   { signal:'HOLD', conf:'low',    note:'Higher-risk than the other Holds: down 12.8% with the Sep-2 CY26 earnings outcome unconfirmed and only 3 analysts covering it. CY25 fundamentals (+65.5% earnings) were solid, but recent evidence is thin — don’t add here.' },
-  SLM:    { signal:'HOLD', conf:'medium', note:'Service Long March Tyres — IPO’d Jun-2026, capacity raised 25% to 2M tyres/yr, passenger-tyre plant planned by 2028. Still under 4 months of trading history; thin coverage.' },
-  SPSL:   { signal:'TRIM', conf:'low',    note:'Sitara Petroleum — IPO’d 21-May-2026 at 18.90, still trading below that IPO price with no offsetting catalyst found. The underperformance itself is the signal. Check your CGT holding-period exposure before trimming — this was bought at the IPO, ~4 months ago.' },
-  HUBC:   { signal:'HOLD', conf:'medium', note:'Rs5/share dividend declared (book closure 13-Oct); diversifying into Thar coal (Thar Energy, ThalNova), which typically slips on Pakistani power-project timelines. Sector-wide circular debt (~Rs1.6trn) remains a standing risk.' },
-};
-
-// Portfolio-level flags from the same research+audit pass — not per-symbol, shown once
-// above the list. Concentration % independently re-verified against the prices/shares
-// actually in FUNDAMENTAL_VIEW's source pass; PKR/liquidity/CGT points were gaps the
-// audit pass found the research pass had missed, not things the technical signal
-// (price-only) could ever surface on its own.
-const FUNDAMENTAL_PORTFOLIO_NOTE = 'Fertilizer + Oil&Gas + Cement together were ~76% of the book on ' + FUNDAMENTAL_VIEW_ASOF + ' — a real sector-cluster concentration (independently verified), and one that shares the same macro exposure (PKR, gas/energy policy, subsidies) across all three, not three genuinely separate bets. Also unaddressed by price-only signals: PKR currency risk on the import-linked names (FFC/EFERT/cement), liquidity/slippage risk on thin-float names (SLM, SPSL, the 100-share HUBC stub), and CGT holding-period exposure on any near-term trim.';
-
-// The "Refresh" button below can't call a live research pipeline from inside this static
-// page - a raw LLM API call with no web/market-data access would just hallucinate Sep-2026
-// PSX prices and news, which is worse than a clearly-dated stale view. So it hands the user
-// a ready-to-paste request instead, describing exactly the two-pass process that produced
-// FUNDAMENTAL_VIEW above (one pass researches each holding with live web access, a second,
-// independent pass fact-checks and adversarially audits the first before anything is
-// accepted) - see this file's own FUNDAMENTAL_VIEW comment for the full description.
-const FUNDAMENTAL_VIEW_REFRESH_PROMPT =
-  'Refresh the Fundamental View in the PSX app (Api/Psx.Api/wwwroot/index.html): pull my current holdings from the live DB (same as before), ' +
-  'run an independent research pass (live PSX prices + recent news/earnings per symbol) and a second, separate audit pass that fact-checks it, ' +
-  'then update FUNDAMENTAL_VIEW, FUNDAMENTAL_VIEW_ASOF, and FUNDAMENTAL_PORTFOLIO_NOTE in index.html with the new dated snapshot.';
-
 function daysSince(isoDate) {
-  const ms = Date.now() - new Date(isoDate + 'T00:00:00').getTime();
+  const ms = Date.now() - new Date(isoDate).getTime();
   return Math.max(0, Math.floor(ms / 86400000));
 }
 
-// Clipboard write needs a secure context and can be denied by the browser - falls back to
-// a plain prompt() (still copyable via Ctrl/Cmd+A, C) so the button always does SOMETHING
-// useful rather than failing silently.
-async function refreshFundamentalView() {
+let fundamentalPanelSymbol = null;
+let fundamentalPanelData = null; // last-loaded {signal, confidence, note, sources, generatedAtUtc} or null
+let fundamentalPanelStatus = 'loading'; // 'loading' | 'ready' | 'notfound' | 'error'
+
+async function loadFundamentalPanel(symbol) {
+  fundamentalPanelSymbol = symbol;
+  fundamentalPanelData = null;
+  fundamentalPanelStatus = 'loading';
+  renderFundamentalPanel();
   try {
-    await navigator.clipboard.writeText(FUNDAMENTAL_VIEW_REFRESH_PROMPT);
-    toast('Refresh request copied — paste it into a Claude Code session on this project to get a fresh, dated, independently-audited snapshot.', 'success', 6000);
+    const res = await fetch(`/api/fundamental/${encodeURIComponent(symbol)}`, { credentials: 'include' });
+    if (fundamentalPanelSymbol !== symbol) return; // modal closed/reopened for another symbol while this was in flight
+    if (res.status === 404) {
+      fundamentalPanelStatus = 'notfound';
+    } else if (!res.ok) {
+      fundamentalPanelStatus = 'error';
+    } else {
+      fundamentalPanelData = await res.json();
+      fundamentalPanelStatus = 'ready';
+    }
   } catch (e) {
-    window.prompt('Copy this and paste it into a Claude Code session on this project:', FUNDAMENTAL_VIEW_REFRESH_PROMPT);
+    if (fundamentalPanelSymbol !== symbol) return;
+    fundamentalPanelStatus = 'error';
   }
+  renderFundamentalPanel();
+}
+
+async function refreshFundamentalPanel(symbol) {
+  const btn = document.getElementById('fundRefreshBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Researching…'; }
+  try {
+    const res = await fetch(`/api/fundamental/${encodeURIComponent(symbol)}/refresh`, { method: 'POST', credentials: 'include' });
+    const body = await res.json().catch(() => ({}));
+    if (fundamentalPanelSymbol !== symbol) return;
+    if (res.status === 429) {
+      toast(body.error || "You've used today's fundamental-analysis refresh.", 'error', 6000);
+      renderFundamentalPanel();
+      return;
+    }
+    if (!res.ok) {
+      toast(body.error || 'Fundamental analysis failed — try again shortly.', 'error', 5000);
+      renderFundamentalPanel();
+      return;
+    }
+    fundamentalPanelData = body;
+    fundamentalPanelStatus = 'ready';
+    renderFundamentalPanel();
+  } catch (e) {
+    if (fundamentalPanelSymbol !== symbol) return;
+    toast('Fundamental analysis failed — try again shortly.', 'error', 5000);
+    renderFundamentalPanel();
+  }
+}
+
+function renderFundamentalPanel() {
+  const el = document.getElementById('fundamentalPanel');
+  if (!el || fundamentalPanelSymbol === null) return;
+
+  const sigColor = { buy:'var(--green)', hold:'var(--amber)', sell:'var(--red)', trim:'#c2410c' };
+  const sigIcon  = { buy:'▲', hold:'◆', sell:'▼', trim:'▽' };
+  const confLabel = { high:'High conviction', medium:'Moderate', low:'Low conviction' };
+  const isAdmin = currentIsAdmin;
+
+  const refreshBtnHtml = `<button id="fundRefreshBtn" class="btn btn-sm" onclick="refreshFundamentalPanel('${escapeForJsAttr(fundamentalPanelSymbol)}')" title="${isAdmin ? 'Admin: unlimited refreshes' : 'Limited to one refresh per day'}">↻ ${fundamentalPanelData ? 'Refresh' : 'Get Fundamental Analysis'}</button>`;
+
+  if (fundamentalPanelStatus === 'loading') {
+    el.innerHTML = `<div style="font-size:11px;color:var(--txt3);padding:6px 0">Loading fundamental view…</div>`;
+    return;
+  }
+  if (fundamentalPanelStatus === 'error') {
+    el.innerHTML = `<div style="font-size:11px;color:var(--txt3);padding:6px 0">Couldn't load fundamental view. ${refreshBtnHtml}</div>`;
+    return;
+  }
+  if (fundamentalPanelStatus === 'notfound' || !fundamentalPanelData) {
+    el.innerHTML = `
+      <div style="padding:9px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid var(--border2)">
+        <div style="font-size:11px;color:var(--txt2)">No AI fundamental analysis yet for this symbol.</div>
+        <div style="margin-top:6px">${refreshBtnHtml}</div>
+      </div>`;
+    return;
+  }
+
+  const f = fundamentalPanelData;
+  const sig = (f.signal || 'hold').toLowerCase();
+  const age = daysSince(f.generatedAtUtc);
+  const ageColor = age > 30 ? 'var(--red)' : age > 14 ? 'var(--amber)' : 'var(--green)';
+  const ageText = age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`;
+  const sourcesHtml = (f.sources || []).length ? `
+    <div style="margin-top:6px;display:flex;flex-direction:column;gap:2px">
+      ${f.sources.map(s => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener" style="font-size:10px;color:var(--accent);text-decoration:none">${escapeHtml(s.title || s.url)}</a>`).join('')}
+    </div>` : '';
+
+  el.innerHTML = `
+    <div style="padding:9px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid ${sigColor[sig] || 'var(--border2)'}">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span class="signal-badge ${sig}" style="font-size:10px;padding:2px 6px">${sigIcon[sig] || ''} ${(f.signal || '').toUpperCase()}</span>
+        <div style="display:flex;align-items:center;gap:8px">
+          <span style="font-size:9px;font-weight:700;color:${ageColor}">${ageText}</span>
+          ${refreshBtnHtml}
+        </div>
+      </div>
+      <div style="font-size:11px;color:var(--txt2);line-height:1.5;margin-top:6px">${escapeHtml(f.note || '')}</div>
+      <div style="font-size:9px;color:var(--txt3);margin-top:3px">${confLabel[f.confidence] || ''} · AI-researched via live web search, not financial advice</div>
+      ${sourcesHtml}
+    </div>`;
 }
 
 function computeTechnicalSignal(symbol) {
@@ -1571,6 +1627,7 @@ let state = {
   priceHistory: {},
   cash: { balance: 0, entries: [] },
   index: null, // { value, change, changePct } for KSE100, or null until first fetched
+  marketVolume: null, // { volume, value } total shares/PKR traded across PSX today, or null until first fetched
   // Per-table "show all" toggles (Transaction History / Realized P&L / Cash Ledger) -
   // in-memory only, not persisted or synced from the server, resets on reload.
   ui: { showAllTx: false, showAllRealized: false, showAllCash: false }
@@ -2366,6 +2423,17 @@ async function fetchPSXIndex() {
       if (parsed) return parsed;
     } catch(e) { continue; }
   }
+  return null;
+}
+
+// Total shares/value traded across all of PSX today - server pre-parses this (see
+// GET /api/prices/market-summary in Program.cs) since it's a JSON response, not raw
+// HTML, so there's no client-side parsing or CORS-proxy fallback needed here.
+async function fetchPSXMarketSummary() {
+  try {
+    const res = await fetch('/api/prices/market-summary', { credentials: 'include', signal: AbortSignal.timeout(15000) });
+    if (res.ok) return await res.json();
+  } catch(e) { /* volumeTicker just stays blank/stale - not worth retrying harder */ }
   return null;
 }
 
@@ -3396,17 +3464,62 @@ function handleSymbolInput() {
 }
 
 let isFetching = false;
+let lastRefreshAt = null; // ms epoch of the last successful refreshPrices() - drives the header's "Updated Xs ago" timer
+
+// "Updated Xs ago" replaces the old manual Refresh Prices button - refreshPrices() now
+// runs on its own (on load + every 15s, see the bottom of this file), so a click target
+// would just be redundant; this instead confirms the auto-refresh is actually alive.
+// While the market's closed the 15s tick stops fetching (see bottom of file), so a
+// growing "Updated Xs ago" would just be a misleading staleness counter - freeze it on
+// a flat "Market closed" instead, same as the fetch itself is frozen.
+function renderRefreshTimer() {
+  const el = document.getElementById('refreshTimer');
+  if (!el) return;
+  if (getMarketStatus().status !== 'open') { el.textContent = 'Market closed'; return; }
+  if (!lastRefreshAt) { el.textContent = ''; return; }
+  const secs = Math.floor((Date.now() - lastRefreshAt) / 1000);
+  el.textContent = secs < 2 ? 'Updated just now' : `Updated ${secs}s ago`;
+}
+
+// KSE-100 trend ticker, header-mounted next to the refresh timer. Reads the same
+// state.index populated by fetchPSXIndex() (see refreshPrices()) - no separate fetch.
+function renderHeaderTicker() {
+  const el = document.getElementById('marketTicker');
+  if (!el) return;
+  const idx = state.index;
+  if (!idx) { el.textContent = ''; return; }
+  const up = idx.change >= 0;
+  el.style.color = up ? 'var(--green)' : 'var(--red)';
+  el.innerHTML = `<span class="arrow">${up ? '▲' : '▼'}</span>KSE-100 ${fNum(idx.value)} <span style="font-weight:500">${fPKR(idx.change, true)} (${fPct(idx.changePct, true)})</span>`;
+}
+
+// 274,869,653 -> "274.9M" - the raw figure is kept in the element's title (full
+// comma-formatted count) for anyone who wants the exact number.
+function fCompact(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(2) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return String(n);
+}
+
+// Total-market volume ticker, next to the KSE-100 one. Reads state.marketVolume
+// populated by fetchPSXMarketSummary() (see refreshPrices()) - no separate fetch.
+function renderVolumeTicker() {
+  const el = document.getElementById('volumeTicker');
+  if (!el) return;
+  const v = state.marketVolume;
+  if (!v) { el.textContent = ''; return; }
+  el.style.color = 'var(--txt2)';
+  el.title = `${v.volume.toLocaleString()} shares traded` + (v.value != null ? ` — PKR ${v.value.toLocaleString()} traded` : '');
+  el.textContent = `${fCompact(v.volume)} shares traded`;
+}
 
 async function refreshPrices(silent = false) {
   if (isFetching) return;
   isFetching = true;
 
   const dot = document.getElementById('statusDot');
-  const icon = document.getElementById('refreshIcon');
-  const btn = document.getElementById('btnRefresh');
   dot.className = 'status-dot fetching';
-  icon.className = 'spin';
-  btn.disabled = true;
 
   const symbols = [...new Set(
     state.transactions.map(t => t.symbol)
@@ -3415,13 +3528,11 @@ async function refreshPrices(silent = false) {
   // KSE100 is fetched regardless of whether there's a portfolio yet - it's independent
   // market context, not tied to any holding.
   fetchPSXIndex().then(idx => { if (idx) { state.index = idx; savePricesCache(); renderKPIs(); } });
+  fetchPSXMarketSummary().then(vol => { if (vol) { state.marketVolume = vol; renderKPIs(); } });
 
   if (symbols.length === 0) {
     if (!silent) toast('No symbols to fetch', 'info');
     isFetching = false;
-    icon.className = '';
-    icon.textContent = '↻';
-    btn.disabled = false;
     return;
   }
 
@@ -3466,17 +3577,17 @@ async function refreshPrices(silent = false) {
 
     const ts = new Date().toLocaleTimeString();
     document.getElementById('lastUpdated').textContent = ts;
+    lastRefreshAt = Date.now();
+    renderRefreshTimer();
     dot.className = failed < symbols.length ? 'status-dot live' : 'status-dot';
   } finally {
-    icon.className = '';
-    icon.textContent = '↻';
-    btn.disabled = false;
     isFetching = false;
   }
 
-  // The automatic tick stays quiet - the status dot and "last updated" time already
-  // give visual confirmation without a toast firing on every cycle. The manual Refresh
-  // button always reports back, since that's an explicit action.
+  // The automatic 15s tick (the only caller now that the manual Refresh button is gone)
+  // stays quiet - the status dot and refresh timer in the header already give visual
+  // confirmation without a toast firing on every cycle. silent=false is kept for any
+  // future explicit/manual call site that should report back.
   if (silent) return;
 
   if (fetched > 0) {
@@ -3533,6 +3644,8 @@ function renderKPIs() {
     setText('kv-index-range', (state.index.low != null && state.index.high != null)
       ? `Day: ${fNum(state.index.low)} – ${fNum(state.index.high)}` : '—');
   }
+  renderHeaderTicker();
+  renderVolumeTicker();
 
   // Method label
   const ml = document.getElementById('methodLabel');
@@ -3991,7 +4104,7 @@ function renderTopMovers() {
   function moverRow(h) {
     const cls = h.returnPct >= 0 ? 'val-pos' : 'val-neg';
     return `<div class="mover-row">
-      <div class="mover-sym">${escapeHtml(h.symbol)}</div>
+      <div class="mover-sym" style="cursor:pointer;text-decoration:underline;text-decoration-style:dotted" onclick="openShareInfoModal('${escapeForJsAttr(h.symbol)}')" title="View company info + AI fundamental analysis">${escapeHtml(h.symbol)}</div>
       <div class="mover-vals">
         <span class="${cls}">${fPct(h.returnPct, true)}</span><br>
         <span class="val-neu" style="font-size:10px">PKR ${fPKR(h.unrealizedPL||0, true)}</span>
@@ -4288,12 +4401,15 @@ function openShareInfoModal(symbol) {
     <div class="empty-state"><div class="es-icon">⏳</div><p>Loading company information…</p></div>`;
   document.getElementById('shareInfoBackdrop').classList.add('open');
   renderShareInfoModal(symbol);
+  loadFundamentalPanel(symbol);
 }
 
 function closeShareInfoModal() {
   document.getElementById('shareInfoBackdrop').classList.remove('open');
   destroyChart('shareInfoChart');
   shareInfoSymbol = null;
+  fundamentalPanelSymbol = null;
+  fundamentalPanelData = null;
 }
 
 function setShareInfoChartRange(range) {
@@ -4380,9 +4496,14 @@ async function renderShareInfoModal(symbol) {
       <div style="margin-top:4px">${priceHeaderHtml}</div>
     </div>
     ${chartHtml}
+    <div class="form-group full" style="margin-bottom:12px">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--txt3);text-transform:uppercase;margin-bottom:6px">Fundamental Analysis (AI)</div>
+      <div id="fundamentalPanel"></div>
+    </div>
     ${profileHtml}`;
 
   renderShareInfoChart();
+  renderFundamentalPanel();
 }
 
 // Renders the parsed PSX company-profile DTO (see parseCompanyProfileHtml) - a
@@ -4656,12 +4777,6 @@ function renderAnalystSummary() {
   const sigIcon  = { BUY:'▲', HOLD:'◆', SELL:'▼' };
   const confLabel = { high:'High conviction', medium:'Moderate', low:'Low conviction' };
 
-  // Same palette idea, extended with TRIM for FUNDAMENTAL_VIEW (a milder "reduce" call
-  // than a full technical SELL, so it gets its own badge colour, not var(--red)).
-  const fundColor = { BUY:'var(--green)', HOLD:'var(--amber)', TRIM:'#c2410c' };
-  const fundIcon  = { BUY:'▲', HOLD:'◆', TRIM:'▽' };
-  const fundConfLabel = { high:'High conviction', medium:'Moderate', low:'Low conviction' };
-
   const rows = activeSymbols
     .map(sym => ({ sym, sig: computeTechnicalSignal(sym) }))
     .filter(r => r.sig)
@@ -4682,8 +4797,6 @@ function renderAnalystSummary() {
   const counts = { BUY: 0, HOLD: 0, SELL: 0 };
   rows.forEach(r => counts[r.sig.signal]++);
 
-  const fundCoveredUncovered = uncovered.filter(sym => FUNDAMENTAL_VIEW[sym]);
-
   el.innerHTML = `
     <div style="display:flex;gap:8px;margin-bottom:12px">
       ${['BUY','HOLD','SELL'].map(s =>
@@ -4693,29 +4806,12 @@ function renderAnalystSummary() {
         </div>`
       ).join('')}
     </div>
-    ${(() => {
-      const age = daysSince(FUNDAMENTAL_VIEW_ASOF);
-      const ageColor = age > 30 ? 'var(--red)' : age > 14 ? 'var(--amber)' : 'var(--green)';
-      const ageText = age === 0 ? 'today' : age === 1 ? '1 day ago' : `${age} days ago`;
-      return `
-    <div style="margin-bottom:12px;padding:9px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid var(--amber)">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
-        <div style="font-size:10px;font-weight:700;letter-spacing:.4px;color:var(--amber);text-transform:uppercase">Fundamental View — snapshot as of ${FUNDAMENTAL_VIEW_ASOF}</div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <span style="font-size:9px;font-weight:700;color:${ageColor}">${ageText}</span>
-          <button class="btn btn-sm" onclick="refreshFundamentalView()" title="Copies a ready-to-paste refresh request — ask Claude to research + independently audit a fresh snapshot">↻ Refresh</button>
-        </div>
-      </div>
-      <div style="font-size:10px;color:var(--txt2);line-height:1.5;margin-top:4px">${FUNDAMENTAL_PORTFOLIO_NOTE}</div>
-      <div style="font-size:9px;color:var(--txt3);margin-top:4px">Manually researched then independently fact-checked/audited — not recomputed automatically like the Technical Signal below. Click Refresh for a ready-to-paste request that regenerates it the same way.</div>
-    </div>`;
-    })()}
     <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:10px">
-      ${rows.map(r => { const f = FUNDAMENTAL_VIEW[r.sym]; return `
+      ${rows.map(r => `
         <div style="display:flex;flex-direction:column;gap:6px;padding:10px 12px;background:var(--elevated);border-radius:var(--r);border-left:2px solid ${sigColor[r.sig.signal]}">
           <div style="display:flex;align-items:flex-start;gap:10px">
             <div style="flex-shrink:0;min-width:44px">
-              <div style="font-weight:700;font-size:13px">${escapeHtml(r.sym)}</div>
+              <div style="font-weight:700;font-size:13px;cursor:pointer;text-decoration:underline;text-decoration-style:dotted" onclick="openShareInfoModal('${escapeForJsAttr(r.sym)}')" title="View company info + AI fundamental analysis">${escapeHtml(r.sym)}</div>
               <span class="signal-badge ${r.sig.signal.toLowerCase()}" style="margin-top:3px;font-size:9px;padding:1px 5px">${sigIcon[r.sig.signal]} ${r.sig.signal}</span>
             </div>
             <div style="flex:1;min-width:0">
@@ -4725,37 +4821,16 @@ function renderAnalystSummary() {
               <div style="font-size:9px;color:var(--txt3);margin-top:3px">Technical · ${confLabel[r.sig.conf]}</div>
             </div>
           </div>
-          ${f ? `
-          <div style="display:flex;align-items:flex-start;gap:10px;padding-top:6px;border-top:1px dashed var(--border)">
-            <div style="flex-shrink:0;min-width:44px">
-              <span class="signal-badge ${f.signal.toLowerCase()}" style="font-size:9px;padding:1px 5px">${fundIcon[f.signal]} ${f.signal}</span>
-            </div>
-            <div style="flex:1;min-width:0">
-              <div style="font-size:10px;color:var(--txt2);line-height:1.5">
-                ${f.note}
-              </div>
-              <div style="font-size:9px;color:var(--txt3);margin-top:3px">Fundamental · ${fundConfLabel[f.conf]}</div>
-            </div>
-          </div>` : ''}
-        </div>`; }).join('')}
+        </div>`).join('')}
     </div>
     ${uncovered.length ? `
     <div style="margin-top:10px;padding:8px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid var(--border2)">
       <div style="font-size:10px;color:var(--txt3);line-height:1.4">
         Loading price history for: <span style="font-family:var(--mono);color:var(--txt2)">${uncovered.map(escapeHtml).join(', ')}</span> — technical signal appears once enough data arrives.
       </div>
-      ${fundCoveredUncovered.length ? `
-      <div style="display:flex;flex-direction:column;gap:4px;margin-top:6px">
-        ${fundCoveredUncovered.map(sym => { const f = FUNDAMENTAL_VIEW[sym]; return `
-        <div style="display:flex;align-items:center;gap:6px" title="${f.note.replace(/'/g,"&#39;")}">
-          <span style="font-size:10px;font-weight:700;min-width:44px">${escapeHtml(sym)}</span>
-          <span class="signal-badge ${f.signal.toLowerCase()}" style="font-size:9px;padding:1px 5px">${fundIcon[f.signal]} ${f.signal}</span>
-          <span style="font-size:9px;color:var(--txt3)">Fundamental view already available</span>
-        </div>`; }).join('')}
-      </div>` : ''}
     </div>` : ''}
     <div style="font-size:10px;color:var(--txt3);margin-top:10px;line-height:1.4">
-      Hover over any signal for its full rationale. Technical Signal (top of each card) is recomputed live from price history; Fundamental View (bottom of each card, dated ${FUNDAMENTAL_VIEW_ASOF}) is manual research and needs a fresh pass to update. Neither is financial advice.
+      Hover over any signal for its full rationale. Technical Signal is recomputed live from price history. Click any symbol for its AI-researched Fundamental Analysis (live web search, cached per symbol, one refresh/day). Neither is financial advice.
     </div>`;
 }
 
@@ -6223,12 +6298,20 @@ async function init() {
   // Live prices/index on load, then every 15s - refreshPrices() already guards against
   // overlapping runs via isFetching, so a slow call just gets skipped by the next tick
   // rather than stacking up. silent=true suppresses the toast so a background tick
-  // doesn't interrupt the user every cycle - the manual Refresh button (not silent)
-  // still reports back explicitly. Kept well above PSX's actual data cadence (market
-  // ticks aren't sub-second) and conservative enough to avoid tripping their edge/WAF,
-  // which has already shown flakiness on full-page scrapes even at the old 60s pace.
+  // doesn't interrupt the user every cycle. Kept well above PSX's actual data cadence
+  // (market ticks aren't sub-second) and conservative enough to avoid tripping their
+  // edge/WAF, which has already shown flakiness on full-page scrapes even at the old
+  // 60s pace. Always fetches once on load regardless of market state (so a visitor
+  // opening the app after-hours still sees the last close's prices), but the recurring
+  // tick skips the fetch entirely while the market is closed/holiday - prices genuinely
+  // don't move outside a session, so polling PSX every 15s for nothing just adds load
+  // against an edge that's already shown flakiness. getMarketStatus() is checked fresh
+  // on every tick, so refreshing resumes on its own the moment a session opens, no
+  // reload needed.
   refreshPrices(true);
-  setInterval(() => refreshPrices(true), 15 * 1000);
+  setInterval(() => { if (getMarketStatus().status === 'open') refreshPrices(true); }, 15 * 1000);
+  // Separate 1s tick just for the "Updated Xs ago" header text - cosmetic only, no fetch.
+  setInterval(renderRefreshTimer, 1000);
 
   // Market status is a pure clock check (no fetch), so it's kept on its own short
   // interval independent of price refreshes - it needs to flip promptly right at a

@@ -12,9 +12,14 @@ public static class PsxHtmlFetcher
 {
     // Returns the raw HTML on success, or null if both the direct fetch and the
     // r.jina.ai fallback failed.
-    public static async Task<string?> FetchAsync(HttpClient client, string psxPath)
+    public static Task<string?> FetchAsync(HttpClient client, string psxPath) =>
+        FetchUrlAsync(client, $"https://dps.psx.com.pk/{psxPath}");
+
+    // Same fetch-and-fallback logic, for a caller that already has a full URL (e.g. the
+    // main www.psx.com.pk site, a different host than the dps.psx.com.pk data subdomain
+    // every other caller here scrapes).
+    public static async Task<string?> FetchUrlAsync(HttpClient client, string url)
     {
-        var url = $"https://dps.psx.com.pk/{psxPath}";
         try
         {
             return await client.GetStringAsync(url);

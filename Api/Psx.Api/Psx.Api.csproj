@@ -8,6 +8,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Pinned below the newest Anthropic releases deliberately: 10.2.0+ raises its own
+         System.Text.Json floor to 10.0.x, which conflicts with this app's net9.0 shared
+         framework on the server (confirmed live - 12.50.0 broke prod startup with a
+         FileNotFoundException on System.Text.Encodings.Web 10.0.6 vs the framework's
+         9.0.0.0). 10.1.2 is the newest version whose own floor ([9.0.9, )) still resolves
+         within the net9.0 framework's own assembly-version family. Only loses dynamic
+         filtering on the web search tool (WebSearchTool20260209 isn't in this version) -
+         falls back to the basic WebSearchTool20250305, which is all this feature needs. -->
+    <PackageReference Include="Anthropic" Version="10.1.2" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="PdfPig" Version="0.1.15" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Design" Version="9.0.5">

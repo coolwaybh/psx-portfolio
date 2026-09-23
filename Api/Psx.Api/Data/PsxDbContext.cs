@@ -10,6 +10,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
     public DbSet<UserSettings> UserSettings => Set<UserSettings>();
     public DbSet<CashEntry> CashEntries => Set<CashEntry>();
     public DbSet<EodPrice> EodPrices => Set<EodPrice>();
+    public DbSet<FundamentalView> FundamentalViews => Set<FundamentalView>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -92,6 +93,15 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.Property(p => p.Symbol).HasMaxLength(20);
             b.Property(p => p.Close).HasColumnType("decimal(18,4)");
             b.HasIndex(p => new { p.Symbol, p.Date }).IsUnique();
+        });
+
+        modelBuilder.Entity<FundamentalView>(b =>
+        {
+            b.HasKey(f => f.Symbol);
+            b.Property(f => f.Symbol).HasMaxLength(20);
+            b.Property(f => f.Signal).HasMaxLength(20);
+            b.Property(f => f.Confidence).HasMaxLength(20);
+            b.Property(f => f.Note).HasMaxLength(2000);
         });
     }
 }

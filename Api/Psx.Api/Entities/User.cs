@@ -13,6 +13,10 @@ public class User
     // set by the AddIsAdmin migration's data seed - no endpoint promotes a user to admin.
     public bool IsAdmin { get; set; } = false;
 
+    // Fundamental-analysis refresh cooldown (one per rolling 24h for non-admins - see
+    // /api/fundamental/{symbol}/refresh in Program.cs). Admins bypass this entirely.
+    public DateTime? LastFundamentalRefreshUtc { get; set; }
+
     public UserSettings? Settings { get; set; }
     public List<LedgerEntry> LedgerEntries { get; set; } = new();
 }

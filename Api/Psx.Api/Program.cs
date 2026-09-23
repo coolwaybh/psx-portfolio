@@ -33,6 +33,7 @@ builder.Services.AddDbContext<PsxDbContext>(options =>
 
 builder.Services.AddSingleton<PsxSymbolDirectory>();
 builder.Services.AddMemoryCache();
+builder.Services.AddScoped<FundamentalAnalysisService>();
 
 builder.Services.AddHttpClient<PsxHistoricalPriceService>(client =>
 {
@@ -543,6 +544,36 @@ prices.MapGet("/indices", async (IHttpClientFactory httpFactory) =>
     return html is not null ? Results.Content(html, "text/html") : Results.StatusCode(StatusCodes.Status502BadGateway);
 });
 
+// Total market-wide shares/value traded today - not on dps.psx.com.pk (neither
+// /indices nor /market-watch expose an aggregate, only per-index/per-symbol rows), but
+// the main www.psx.com.pk homepage's "Market Highlights" widget has it in a small
+// <table id="activity"> with stable td ids (confirmed against the live page 2026-09-23):
+// id="volume" -> total shares traded, id="value" -> total PKR value traded. (PSX's own
+// markup reuses id="volume" a second time, by mistake, for the "Previous Close" row -
+// harmless here since a regex Match takes the first occurrence, same document order as
+// the real Volume row.) Parsed server-side with a small regex rather than pulling in an
+// HTML parser package for three numbers, and cached briefly so the 15s client poll
+// doesn't hit PSX's homepage that often.
+prices.MapGet("/market-summary", async (IHttpClientFactory httpFactory, IMemoryCache cache) =>
+{
+    const string cacheKey = "market-summary";
+    if (cache.TryGetValue(cacheKey, out MarketSummaryDto? cached) && cached is not null)
+        return Results.Ok(cached);
+
+    var client = httpFactory.CreateClient();
+    client.Timeout = TimeSpan.FromSeconds(20);
+    var html = await PsxHtmlFetcher.FetchUrlAsync(client, "https://www.psx.com.pk");
+    if (html is null) return Results.StatusCode(StatusCodes.Status502BadGateway);
+
+    var volume = ExtractPsxStatValue(html, "volume");
+    var value = ExtractPsxStatValue(html, "value");
+    if (volume is null) return Results.StatusCode(StatusCodes.Status502BadGateway);
+
+    var result = new MarketSummaryDto(volume.Value, value);
+    cache.Set(cacheKey, result, TimeSpan.FromSeconds(20));
+    return Results.Ok(result);
+});
+
 // PSX's per-company profile page (Business Description, Key People, P/E, Market Cap, EPS/
 // Sales/Profit financials) - feeds the Share Information overlay. Cached server-side
 // (6h) unlike market-watch/indices: fundamentals don't move intraday, so re-scraping PSX
@@ -566,6 +597,76 @@ prices.MapGet("/company/{symbol}", async (string symbol, IHttpClientFactory http
 
     cache.Set(cacheKey, html, TimeSpan.FromHours(6));
     return Results.Content(html, "text/html");
+});
+
+// ── FUNDAMENTAL VIEW ──────────────────────────────────────────────────
+// One AI-researched snapshot per symbol (see FundamentalAnalysisService), cached in
+// FundamentalViews and shared by every user - only the refresh action is per-user-rate-
+// limited, reading a cached view is free and unrestricted for any logged-in user.
+var fundamental = app.MapGroup("/api/fundamental").RequireAuthorization();
+
+fundamental.MapGet("/{symbol}", async (string symbol, PsxDbContext db) =>
+{
+    var sym = symbol.Trim().ToUpperInvariant();
+    if (!IsValidSymbol(sym)) return Results.BadRequest(new { error = "Invalid symbol." });
+
+    var view = await db.FundamentalViews.FirstOrDefaultAsync(f => f.Symbol == sym);
+    if (view is null) return Results.NotFound(new { cached = false });
+
+    return Results.Ok(FundamentalViewDto.From(view));
+});
+
+fundamental.MapPost("/{symbol}/refresh", async (string symbol, ClaimsPrincipal principal, PsxDbContext db, FundamentalAnalysisService svc) =>
+{
+    var sym = symbol.Trim().ToUpperInvariant();
+    if (!IsValidSymbol(sym)) return Results.BadRequest(new { error = "Invalid symbol." });
+
+    var isAdmin = principal.HasClaim("IsAdmin", "true");
+    User? user = null;
+    if (!isAdmin)
+    {
+        var userId = principal.GetUserId();
+        user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+        if (user is null) return Results.Unauthorized();
+
+        if (user.LastFundamentalRefreshUtc is { } last && DateTime.UtcNow - last < TimeSpan.FromHours(24))
+        {
+            var retryAt = last.AddHours(24);
+            return Results.Json(
+                new { error = "You've used today's fundamental-analysis refresh. Try again later.", retryAfterUtc = retryAt },
+                statusCode: StatusCodes.Status429TooManyRequests);
+        }
+    }
+
+    FundamentalAnalysisResult result;
+    try
+    {
+        result = await svc.AnalyzeAsync(sym);
+    }
+    catch (Exception)
+    {
+        // Rate-limit timestamp is only touched after a successful analysis (below) - a
+        // failed attempt (AI/network error) must not burn the user's one refresh for the day.
+        return Results.Json(new { error = "Fundamental analysis is temporarily unavailable — try again shortly." },
+            statusCode: StatusCodes.Status502BadGateway);
+    }
+
+    var view = await db.FundamentalViews.FirstOrDefaultAsync(f => f.Symbol == sym);
+    if (view is null)
+    {
+        view = new FundamentalView { Symbol = sym };
+        db.FundamentalViews.Add(view);
+    }
+    view.Signal = result.Signal;
+    view.Confidence = result.Confidence;
+    view.Note = result.Note;
+    view.SourcesJson = JsonSerializer.Serialize(result.Sources);
+    view.GeneratedAtUtc = DateTime.UtcNow;
+
+    if (user is not null) user.LastFundamentalRefreshUtc = DateTime.UtcNow;
+
+    await db.SaveChangesAsync();
+    return Results.Ok(FundamentalViewDto.From(view));
 });
 
 // ── CASH LEDGER ───────────────────────────────────────────────────────
@@ -715,6 +816,12 @@ admin.MapPost("/users/{id:int}/reset-password", async (int id, AdminResetPasswor
 });
 
 app.Run();
+
+static long? ExtractPsxStatValue(string html, string tdId)
+{
+    var m = Regex.Match(html, $@"id=""{tdId}""[^>]*>\s*([\d,]+)");
+    return m.Success && long.TryParse(m.Groups[1].Value.Replace(",", ""), out var v) ? v : null;
+}
 
 static bool IsValidUsername(string s) => Regex.IsMatch(s, @"^[A-Za-z0-9_\-]+$");
 static bool IsValidSymbol(string s) => Regex.IsMatch(s, @"^[A-Z0-9\-]+$");
@@ -948,6 +1055,16 @@ record CashCreateRequest(string Type, string Date, string? Notes, decimal? Amoun
 record HistoricalPriceRequest(string Date, List<string>? Symbols);
 record PriceHistoryRequest(List<string>? Symbols);
 record EodPricePointDto(string Date, decimal Close);
+record MarketSummaryDto(long Volume, long? Value);
+record FundamentalSourceOut(string Title, string Url);
+record FundamentalViewDto(string Symbol, string Signal, string Confidence, string Note, List<FundamentalSourceOut> Sources, string GeneratedAtUtc)
+{
+    public static FundamentalViewDto From(FundamentalView f) => new(
+        f.Symbol, f.Signal, f.Confidence, f.Note,
+        JsonSerializer.Deserialize<List<FundamentalSourceOut>>(f.SourcesJson) ?? new(),
+        f.GeneratedAtUtc.ToString("o")
+    );
+}
 record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, string? Symbol, int? LinkedEntryId, decimal? GrossAmount, decimal? TaxRatePct, int? LedgerEntryId, decimal? CgtAmount, decimal? CdcHoldAmount)
 {
     public static CashDto From(CashEntry e) => new(
