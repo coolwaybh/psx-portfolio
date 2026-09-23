@@ -11,6 +11,9 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
     public DbSet<CashEntry> CashEntries => Set<CashEntry>();
     public DbSet<EodPrice> EodPrices => Set<EodPrice>();
     public DbSet<FundamentalView> FundamentalViews => Set<FundamentalView>();
+    public DbSet<MutualFund> MutualFunds => Set<MutualFund>();
+    public DbSet<FundTransaction> FundTransactions => Set<FundTransaction>();
+    public DbSet<FundNavHistory> FundNavHistories => Set<FundNavHistory>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -102,6 +105,56 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
             b.Property(f => f.Signal).HasMaxLength(20);
             b.Property(f => f.Confidence).HasMaxLength(20);
             b.Property(f => f.Note).HasMaxLength(2000);
+        });
+
+        modelBuilder.Entity<MutualFund>(b =>
+        {
+            b.Property(f => f.Name).HasMaxLength(200);
+            b.Property(f => f.Amc).HasMaxLength(100);
+            b.Property(f => f.Category).HasMaxLength(50);
+            b.Property(f => f.CurrentNav).HasColumnType("decimal(18,4)");
+            b.HasIndex(f => f.UserId);
+            b.HasOne(f => f.User)
+                .WithMany()
+                .HasForeignKey(f => f.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<FundTransaction>(b =>
+        {
+            b.Property(t => t.Type).HasConversion<string>().HasMaxLength(20);
+            b.Property(t => t.Units).HasColumnType("decimal(18,4)");
+            b.Property(t => t.Nav).HasColumnType("decimal(18,4)");
+            b.Property(t => t.Amount).HasColumnType("decimal(18,4)");
+            b.Property(t => t.FrontLoadPct).HasColumnType("decimal(5,2)");
+            b.Property(t => t.BackLoadPct).HasColumnType("decimal(5,2)");
+            b.Property(t => t.CgtAmount).HasColumnType("decimal(18,4)");
+            b.Property(t => t.Notes).HasMaxLength(1000);
+            b.HasIndex(t => new { t.UserId, t.FundId });
+            b.HasOne(t => t.User)
+                .WithMany()
+                .HasForeignKey(t => t.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+            // NoAction, not Cascade - FundTransactions already cascades from Users
+            // directly above, and Users -> MutualFunds -> FundTransactions would be a
+            // second cascade path to the same table (SQL Server error 1785), same
+            // reasoning as LedgerEntry's link on CashEntry.
+            b.HasOne(t => t.Fund)
+                .WithMany()
+                .HasForeignKey(t => t.FundId)
+                .OnDelete(DeleteBehavior.NoAction);
+        });
+
+        modelBuilder.Entity<FundNavHistory>(b =>
+        {
+            b.Property(h => h.Nav).HasColumnType("decimal(18,4)");
+            b.HasIndex(h => new { h.FundId, h.AsOfDate }).IsUnique();
+            // Cascade is fine here (unlike FundTransaction above) - FundNavHistory only
+            // has this one path down from User (via Fund), no second path to collide with.
+            b.HasOne(h => h.Fund)
+                .WithMany()
+                .HasForeignKey(h => h.FundId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
     }
 }

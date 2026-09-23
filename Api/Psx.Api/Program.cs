@@ -197,6 +197,20 @@ auth.MapPost("/change-password", async (ChangePasswordRequest req, ClaimsPrincip
     return Results.Ok();
 }).RequireAuthorization();
 
+// Re-verifies the current user's own password without touching the session or
+// anything else - the confirmation step for Clear All Data (see confirmClearAll /
+// confirmClearFunds), so a mis-click can't silently wipe a portfolio the way a plain
+// confirm() dialog could.
+auth.MapPost("/verify-password", async (AuthRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var user = await db.Users.FirstOrDefaultAsync(u => u.Id == userId);
+    var ok = PasswordHasher.Verify(req.Password ?? "", user?.PasswordHash ?? PasswordHasher.DummyHash);
+    if (!ok)
+        return Results.Json(new { error = "Incorrect password." }, statusCode: StatusCodes.Status401Unauthorized);
+    return Results.Ok();
+}).RequireAuthorization();
+
 // ── LEDGER ────────────────────────────────────────────────────────────
 var ledger = app.MapGroup("/api/ledger").RequireAuthorization();
 
@@ -786,6 +800,346 @@ cash.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
     return Results.Ok(new { deleted = count });
 });
 
+// ── MUTUAL FUNDS ──────────────────────────────────────────────────────
+// Deliberately has no link to LedgerEntries/CashEntries - a bug here can't corrupt the
+// stock side of the portfolio. Buy/Sell/Dividend amounts are always server-computed from
+// Units/Nav/FrontLoadPct/BackLoadPct (never trusted from the client), same trust boundary
+// as CashCreateRequest's dividend/CDC-hold branches above.
+var funds = app.MapGroup("/api/funds").RequireAuthorization();
+
+funds.MapGet("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var userFunds = await db.MutualFunds.Where(f => f.UserId == userId).ToListAsync();
+    var fundIds = userFunds.Select(f => f.Id).ToList();
+    var transactions = await db.FundTransactions
+        .Where(t => t.UserId == userId)
+        .OrderByDescending(t => t.TxDate)
+        .ToListAsync();
+    var history = await db.FundNavHistories
+        .Where(h => fundIds.Contains(h.FundId))
+        .OrderBy(h => h.AsOfDate)
+        .ToListAsync();
+
+    return Results.Ok(new
+    {
+        funds = userFunds.Select(FundDto.From),
+        transactions = transactions.Select(FundTransactionDto.From),
+        navHistory = history
+            .GroupBy(h => h.FundId)
+            .ToDictionary(g => g.Key.ToString(), g => g.Select(h => new FundNavPointDto(h.AsOfDate.ToString("yyyy-MM-dd"), h.Nav)))
+    });
+});
+
+funds.MapPost("/funds", async (FundCreateRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var name = (req.Name ?? "").Trim();
+    if (string.IsNullOrWhiteSpace(name) || name.Length > 200)
+        return Results.BadRequest(new { error = "Name must be 1-200 characters." });
+    if ((req.Amc?.Length ?? 0) > 100)
+        return Results.BadRequest(new { error = "AMC must be 100 characters or fewer." });
+    if ((req.Category?.Length ?? 0) > 50)
+        return Results.BadRequest(new { error = "Category must be 50 characters or fewer." });
+    if (req.CurrentNav <= 0)
+        return Results.BadRequest(new { error = "Current NAV must be positive." });
+    var navDate = DateOnly.FromDateTime(DateTime.UtcNow);
+    if (!string.IsNullOrWhiteSpace(req.NavDate) && !DateOnly.TryParse(req.NavDate, out navDate))
+        return Results.BadRequest(new { error = "NAV date is invalid." });
+
+    var fund = new MutualFund
+    {
+        UserId = userId,
+        Name = name,
+        Amc = req.Amc ?? "",
+        Category = req.Category ?? "",
+        CurrentNav = req.CurrentNav,
+        NavUpdatedAt = navDate,
+    };
+
+    var strategy = db.Database.CreateExecutionStrategy();
+    await strategy.ExecuteAsync(async () =>
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        db.MutualFunds.Add(fund);
+        await db.SaveChangesAsync();
+        db.FundNavHistories.Add(new FundNavHistory { FundId = fund.Id, Nav = req.CurrentNav, AsOfDate = navDate });
+        await db.SaveChangesAsync();
+        await tx.CommitAsync();
+    });
+
+    return Results.Created($"/api/funds/funds/{fund.Id}", FundDto.From(fund));
+});
+
+funds.MapPost("/transactions/buy", async (FundTxBuyRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var (fund, date, error) = await TryBuildFundTx(req.FundId, req.Date, req.Notes, userId, db);
+    if (fund is null) return Results.BadRequest(new { error });
+    if (req.Units <= 0) return Results.BadRequest(new { error = "Units must be positive." });
+    if (req.Nav <= 0) return Results.BadRequest(new { error = "NAV must be positive." });
+    if (req.FrontLoadPct < 0 || req.FrontLoadPct > 100)
+        return Results.BadRequest(new { error = "Front load % must be between 0 and 100." });
+
+    var amount = Math.Round(req.Units * req.Nav * (1 + req.FrontLoadPct / 100m), 2, MidpointRounding.AwayFromZero);
+    var entry = new FundTransaction
+    {
+        UserId = userId,
+        FundId = fund!.Id,
+        Type = FundTxType.Buy,
+        TxDate = date,
+        Units = req.Units,
+        Nav = req.Nav,
+        Amount = amount,
+        FrontLoadPct = req.FrontLoadPct,
+        Notes = req.Notes,
+    };
+    db.FundTransactions.Add(entry);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/funds/transactions/{entry.Id}", FundTransactionDto.From(entry));
+});
+
+funds.MapPost("/transactions/sell", async (FundTxSellRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var (fund, date, error) = await TryBuildFundTx(req.FundId, req.Date, req.Notes, userId, db);
+    if (fund is null) return Results.BadRequest(new { error });
+    if (req.Units <= 0) return Results.BadRequest(new { error = "Units must be positive." });
+    if (req.Nav <= 0) return Results.BadRequest(new { error = "NAV must be positive." });
+    if (req.BackLoadPct < 0 || req.BackLoadPct > 100)
+        return Results.BadRequest(new { error = "Back load % must be between 0 and 100." });
+    if (req.CgtAmount < 0)
+        return Results.BadRequest(new { error = "CGT amount cannot be negative." });
+
+    var existing = await db.FundTransactions.Where(t => t.UserId == userId).ToListAsync();
+    var available = FundHoldingsCalculator.UnitsHeld(existing, fund!.Id);
+    if (req.Units > available + 0.000000001m)
+        return Results.BadRequest(new { error = $"Cannot sell {req.Units} units — only {available} available." });
+
+    // The AMC withholds CGT on the realized gain before crediting redemption proceeds,
+    // same as NCCPL does on a stock sell (see POST /api/ledger) - net it out of Amount
+    // rather than track it as an un-netted disclosure figure, so realized P&L (Amount -
+    // avgCost * units, see computeFundHoldings) already reads net of CGT.
+    var grossAmount = req.Units * req.Nav * (1 - req.BackLoadPct / 100m);
+    if (req.CgtAmount > grossAmount)
+        return Results.BadRequest(new { error = "CGT amount cannot exceed the sale proceeds." });
+    var amount = Math.Round(grossAmount - req.CgtAmount, 2, MidpointRounding.AwayFromZero);
+    var entry = new FundTransaction
+    {
+        UserId = userId,
+        FundId = fund.Id,
+        Type = FundTxType.Sell,
+        TxDate = date,
+        Units = req.Units,
+        Nav = req.Nav,
+        Amount = amount,
+        BackLoadPct = req.BackLoadPct,
+        CgtAmount = req.CgtAmount > 0 ? req.CgtAmount : null,
+        Notes = req.Notes,
+    };
+    db.FundTransactions.Add(entry);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/funds/transactions/{entry.Id}", FundTransactionDto.From(entry));
+});
+
+funds.MapPost("/transactions/dividend", async (FundDividendRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var (fund, date, error) = await TryBuildFundTx(req.FundId, req.Date, req.Notes, userId, db);
+    if (fund is null) return Results.BadRequest(new { error });
+
+    FundTransaction entry;
+    if (string.Equals(req.Type, "reinvest", StringComparison.OrdinalIgnoreCase))
+    {
+        if (req.Units is not decimal units || units <= 0)
+            return Results.BadRequest(new { error = "Units must be positive." });
+        if (req.Nav is not decimal nav || nav <= 0)
+            return Results.BadRequest(new { error = "NAV must be positive." });
+        entry = new FundTransaction
+        {
+            UserId = userId,
+            FundId = fund!.Id,
+            Type = FundTxType.DividendReinvest,
+            TxDate = date,
+            Units = units,
+            Nav = nav,
+            Amount = Math.Round(units * nav, 2, MidpointRounding.AwayFromZero),
+            Notes = req.Notes,
+        };
+    }
+    else if (string.Equals(req.Type, "cash", StringComparison.OrdinalIgnoreCase))
+    {
+        if (req.Amount is not decimal amount || amount <= 0)
+            return Results.BadRequest(new { error = "Amount must be positive." });
+        entry = new FundTransaction
+        {
+            UserId = userId,
+            FundId = fund!.Id,
+            Type = FundTxType.DividendCash,
+            TxDate = date,
+            Amount = amount,
+            Notes = req.Notes,
+        };
+    }
+    else
+    {
+        return Results.BadRequest(new { error = "Type must be 'reinvest' or 'cash'." });
+    }
+
+    db.FundTransactions.Add(entry);
+    await db.SaveChangesAsync();
+    return Results.Created($"/api/funds/transactions/{entry.Id}", FundTransactionDto.From(entry));
+});
+
+// Narrow, deliberately scoped edit - only Date/Notes, never Units/Nav/Type/FundId. Those
+// drive units-held and negative-balance validation (see FundHoldingsCalculator), so
+// changing them after the fact would need the same batch-replay checks as a delete +
+// re-add; same reasoning as ledger.MapPut("/{id:int}/charges") above.
+funds.MapPut("/transactions/{id:int}", async (int id, FundTxUpdateRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var entry = await db.FundTransactions.FirstOrDefaultAsync(t => t.Id == id);
+    if (entry is null || entry.UserId != userId) return Results.NotFound();
+    if (!DateOnly.TryParse(req.Date, out var date))
+        return Results.BadRequest(new { error = "Date is invalid." });
+    if ((req.Notes?.Length ?? 0) > 1000)
+        return Results.BadRequest(new { error = "Notes must be 1000 characters or fewer." });
+
+    entry.TxDate = date;
+    entry.Notes = req.Notes;
+    await db.SaveChangesAsync();
+    return Results.Ok(FundTransactionDto.From(entry));
+});
+
+funds.MapDelete("/transactions/{id:int}", async (int id, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var entry = await db.FundTransactions.FirstOrDefaultAsync(t => t.Id == id);
+    if (entry is null || entry.UserId != userId) return Results.NotFound();
+
+    var existing = await db.FundTransactions.Where(t => t.UserId == userId).ToListAsync();
+    if (!FundHoldingsCalculator.CanRemoveWithoutNegativeBalance(existing, entry.FundId, entry.Id))
+        return Results.BadRequest(new { error = "Cannot delete — would cause negative units held on a later sell." });
+
+    db.FundTransactions.Remove(entry);
+    await db.SaveChangesAsync();
+    return Results.Ok();
+});
+
+// Wipes every fund the user tracks - the Mutual Funds half of Settings' Clear All Data
+// (see ledger.MapDelete("/") for the stocks half), gated client-side behind its own
+// confirmation + password re-entry so it can never fire as a side effect of clearing
+// the other data set.
+funds.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var strategy = db.Database.CreateExecutionStrategy();
+    int count = 0;
+    await strategy.ExecuteAsync(async () =>
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        // FundTransactions.FundId -> MutualFunds has no cascade (EF drops the second
+        // cascade path once Users -> MutualFunds already cascades - see the
+        // AddMutualFunds migration), so transactions must go first or the fund delete
+        // below hits a foreign-key violation. FundNavHistories does cascade, but it's
+        // removed explicitly too so this endpoint stays correct even if that changes.
+        await db.FundTransactions.Where(t => t.UserId == userId).ExecuteDeleteAsync();
+        var fundIds = await db.MutualFunds.Where(f => f.UserId == userId).Select(f => f.Id).ToListAsync();
+        await db.FundNavHistories.Where(h => fundIds.Contains(h.FundId)).ExecuteDeleteAsync();
+        count = await db.MutualFunds.Where(f => f.UserId == userId).ExecuteDeleteAsync();
+        await tx.CommitAsync();
+    });
+    return Results.Ok(new { deleted = count });
+});
+
+// Parses a UBL/Al-Ameen portfolio statement PDF into candidate opening positions for
+// the user to review one-by-one - this endpoint never saves anything itself, same
+// contract as POST /api/ledger/import/pdf. Two statement formats are recognized (see
+// FundStatementParser and FundCostStatementParser) - tried in turn, first one to
+// return any candidates wins, since a PDF can only match one format's anchor text. The
+// frontend posts each confirmed candidate as a normal Buy (0% load - see
+// setFundOpeningModeUI), creating the fund first if it doesn't exist yet, and - when
+// the candidate carries a MarketPrice (the Investment Cost format only) - also pushes
+// a NAV update so unrealized gain/loss is correct immediately. The uploaded file is
+// never persisted to disk.
+funds.MapPost("/import/pdf", async (IFormFile file) =>
+{
+    const long MaxFileSizeBytes = 5 * 1024 * 1024;
+    if (file.Length > MaxFileSizeBytes)
+        return Results.BadRequest(new { error = "File too large — please upload a PDF under 5MB." });
+
+    FundStatementParseResult result;
+    try
+    {
+        await using var stream = file.OpenReadStream();
+        using var buffer = new MemoryStream();
+        await stream.CopyToAsync(buffer);
+        buffer.Position = 0;
+        result = FundStatementParser.Parse(buffer);
+        if (result.Candidates.Count == 0)
+        {
+            buffer.Position = 0;
+            var costResult = FundCostStatementParser.Parse(buffer);
+            if (costResult.Candidates.Count > 0) result = costResult;
+        }
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(new { error = ex.Message });
+    }
+
+    return Results.Ok(new { candidates = result.Candidates, warnings = result.Warnings });
+})
+.DisableAntiforgery();
+
+funds.MapPost("/nav-updates", async (FundNavBulkUpdateRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    if (req.Updates is null || req.Updates.Count == 0)
+        return Results.BadRequest(new { error = "At least one NAV update is required." });
+
+    var fundIds = req.Updates.Select(u => u.FundId).Distinct().ToList();
+    var userFunds = await db.MutualFunds.Where(f => f.UserId == userId && fundIds.Contains(f.Id)).ToListAsync();
+    if (userFunds.Count != fundIds.Count)
+        return Results.BadRequest(new { error = "One or more funds were not found." });
+
+    var parsed = new List<(MutualFund Fund, decimal Nav, DateOnly Date)>();
+    foreach (var u in req.Updates)
+    {
+        if (u.Nav <= 0)
+            return Results.BadRequest(new { error = "NAV must be positive." });
+        if (!DateOnly.TryParse(u.Date, out var date))
+            return Results.BadRequest(new { error = "Date is invalid." });
+        parsed.Add((userFunds.First(f => f.Id == u.FundId), u.Nav, date));
+    }
+
+    var strategy = db.Database.CreateExecutionStrategy();
+    await strategy.ExecuteAsync(async () =>
+    {
+        await using var tx = await db.Database.BeginTransactionAsync();
+        foreach (var (fund, nav, date) in parsed)
+        {
+            var row = await db.FundNavHistories.FirstOrDefaultAsync(h => h.FundId == fund.Id && h.AsOfDate == date);
+            if (row is null)
+                db.FundNavHistories.Add(new FundNavHistory { FundId = fund.Id, Nav = nav, AsOfDate = date });
+            else
+                row.Nav = nav;
+
+            // Only advance CurrentNav forward - a backdated correction shouldn't clobber
+            // a more recent NAV already on record.
+            if (date >= fund.NavUpdatedAt)
+            {
+                fund.CurrentNav = nav;
+                fund.NavUpdatedAt = date;
+            }
+        }
+        await db.SaveChangesAsync();
+        await tx.CommitAsync();
+    });
+
+    return Results.Ok(new { updated = parsed.Count });
+});
+
 // ── ADMIN ─────────────────────────────────────────────────────────────
 // No self-service email/token password reset in this app (small trusted user base, no
 // email sending set up) - instead the single seeded admin account (see AddIsAdmin
@@ -1026,6 +1380,21 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
     return true;
 }
 
+// Shared setup for the three fund-transaction endpoints (buy/sell/dividend): resolves and
+// authorizes the fund and parses the date. Can't use the out-param TryBuild* shape the
+// cash/ledger helpers above use, since it needs an async DB lookup and async methods
+// can't declare out parameters - returns a tuple instead, with Fund == null meaning
+// validation failed and Error explaining why.
+static async Task<(MutualFund? Fund, DateOnly Date, string? Error)> TryBuildFundTx(
+    int fundId, string? dateStr, string? notes, int userId, PsxDbContext db)
+{
+    var fund = await db.MutualFunds.FirstOrDefaultAsync(f => f.Id == fundId && f.UserId == userId);
+    if (fund is null) return (null, default, "Fund not found.");
+    if (!DateOnly.TryParse(dateStr, out var date)) return (null, default, "Date is invalid.");
+    if ((notes?.Length ?? 0) > 1000) return (null, default, "Notes must be 1000 characters or fewer.");
+    return (fund, date, null);
+}
+
 record AuthRequest(string? Username, string? Password);
 record ChangePasswordRequest(string? CurrentPassword, string? NewPassword);
 record AdminResetPasswordRequest(string? NewPassword);
@@ -1070,6 +1439,30 @@ record CashDto(int Id, string Type, decimal Amount, string Date, string? Notes, 
     public static CashDto From(CashEntry e) => new(
         e.Id, e.Type.ToString().ToLowerInvariant(), e.Amount, e.EntryDate.ToString("yyyy-MM-dd"), e.Notes,
         e.Symbol, e.LinkedEntryId, e.GrossAmount, e.TaxRatePct, e.LedgerEntryId, e.CgtAmount, e.CdcHoldAmount
+    );
+}
+
+record FundCreateRequest(string Name, string? Amc, string? Category, decimal CurrentNav, string? NavDate);
+record FundTxBuyRequest(int FundId, string Date, decimal Units, decimal Nav, decimal FrontLoadPct, string? Notes);
+record FundTxSellRequest(int FundId, string Date, decimal Units, decimal Nav, decimal BackLoadPct, string? Notes, decimal CgtAmount = 0);
+record FundDividendRequest(int FundId, string Date, string Type, decimal? Units, decimal? Nav, decimal? Amount, string? Notes);
+record FundTxUpdateRequest(string Date, string? Notes);
+record FundNavUpdateItem(int FundId, decimal Nav, string Date);
+record FundNavBulkUpdateRequest(List<FundNavUpdateItem> Updates);
+record FundNavPointDto(string Date, decimal Nav);
+
+record FundDto(int Id, string Name, string Amc, string Category, decimal CurrentNav, string NavUpdatedAt)
+{
+    public static FundDto From(MutualFund f) => new(
+        f.Id, f.Name, f.Amc, f.Category, f.CurrentNav, f.NavUpdatedAt.ToString("yyyy-MM-dd")
+    );
+}
+
+record FundTransactionDto(int Id, int FundId, string Type, string Date, decimal Units, decimal Nav, decimal Amount, decimal FrontLoadPct, decimal BackLoadPct, string? Notes, decimal? CgtAmount)
+{
+    public static FundTransactionDto From(FundTransaction t) => new(
+        t.Id, t.FundId, t.Type.ToString().ToLowerInvariant(), t.TxDate.ToString("yyyy-MM-dd"), t.Units, t.Nav, t.Amount,
+        t.FrontLoadPct, t.BackLoadPct, t.Notes, t.CgtAmount
     );
 }
 

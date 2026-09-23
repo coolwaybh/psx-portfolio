@@ -3,6 +3,7 @@ using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Psx.Api.Data;
 
@@ -11,9 +12,11 @@ using Psx.Api.Data;
 namespace Psx.Api.Migrations
 {
     [DbContext(typeof(PsxDbContext))]
-    partial class PsxDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260923154914_AddMutualFunds")]
+    partial class AddMutualFunds
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -152,9 +155,6 @@ namespace Psx.Api.Migrations
 
                     b.Property<decimal>("BackLoadPct")
                         .HasColumnType("decimal(5,2)");
-
-                    b.Property<decimal?>("CgtAmount")
-                        .HasColumnType("decimal(18,4)");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");

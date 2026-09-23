@@ -130,6 +130,21 @@ a{color:var(--accent);text-decoration:none}
 .market-ticker .arrow{margin-right:2px}
 .refresh-timer{font-size:11px;color:var(--txt3);font-family:var(--mono);white-space:nowrap}
 
+/* ── TAB NAV ─────────────────────────────────────────────────── */
+.tab-nav{
+  position:sticky;top:56px;z-index:150;
+  display:flex;gap:4px;padding:10px 20px;
+  background:rgba(255,255,255,.92);backdrop-filter:blur(14px);
+  border-bottom:1px solid var(--border2);
+}
+.tab-btn{
+  padding:7px 16px;border-radius:var(--r);border:1px solid transparent;
+  background:transparent;color:var(--txt2);font-size:13px;font-weight:600;
+  cursor:pointer;transition:all .15s;
+}
+.tab-btn:hover{color:var(--txt)}
+.tab-btn.active{background:var(--accent-bg);color:var(--accent);border-color:rgba(26,86,219,.2)}
+
 /* ── BUTTONS ─────────────────────────────────────────────────── */
 .btn{
   display:inline-flex;align-items:center;gap:6px;
@@ -359,7 +374,12 @@ a{color:var(--accent);text-decoration:none}
   flex-shrink:0;
 }
 .modal-title{font-size:16px;font-weight:600}
-.modal-body{padding:20px;overflow-y:auto;flex:1 1 auto;min-height:0}
+.modal-body{padding:20px;overflow-y:auto;overflow-x:hidden;flex:1 1 auto;min-height:0}
+/* Hides the native up/down spinner - used on number inputs where stepping by 1 with
+   arrow buttons isn't a meaningful interaction (units/NAV/amount are typed or pasted
+   values, not counters), and the spinner box eats width in an already-tight modal. */
+.no-spin::-webkit-outer-spin-button,.no-spin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.no-spin[type=number]{-moz-appearance:textfield}
 .modal-ft{
   padding:16px 20px;border-top:1px solid var(--border2);
   display:flex;justify-content:flex-end;gap:8px;
@@ -381,12 +401,17 @@ a{color:var(--accent);text-decoration:none}
 .form-error{font-size:11px;color:var(--red);margin-top:2px}
 .type-toggle{display:flex;gap:6px}
 .type-btn{
-  flex:1;padding:9px;border:1px solid var(--border);border-radius:var(--r);
+  flex:1;min-width:0;padding:9px 4px;border:1px solid var(--border);border-radius:var(--r);
   background:var(--elevated);color:var(--txt2);cursor:pointer;font-size:13px;
   font-weight:500;text-align:center;transition:all .15s;
 }
 .type-btn.active-buy{background:var(--green-bg);border-color:var(--green);color:var(--green)}
 .type-btn.active-sell{background:var(--red-bg);border-color:var(--red);color:var(--red)}
+.type-btn.active-div{background:var(--accent-bg);color:var(--accent);border-color:rgba(26,86,219,.3)}
+
+/* ── NAV UPDATE ROW ──────────────────────────────────────────── */
+.nav-update-row{display:grid;grid-template-columns:1.6fr 1fr 1fr;gap:8px;align-items:end;padding:10px;border:1px solid var(--border2);border-radius:var(--r)}
+.nav-update-row.stale{border-color:var(--amber);background:var(--amber-bg)}
 
 /* ── SETTINGS PANEL ──────────────────────────────────────────── */
 .settings-panel{
@@ -475,6 +500,7 @@ a{color:var(--accent);text-decoration:none}
   .kpi-grid{grid-template-columns:repeat(2,1fr)}
   .settings-panel{width:100%}
   .movers-grid{grid-template-columns:1fr}
+  .nav-update-row{grid-template-columns:1fr;align-items:stretch}
 }
 @media(max-width:480px){
   .kpi-grid{grid-template-columns:1fr}
@@ -557,6 +583,15 @@ a{color:var(--accent);text-decoration:none}
     <button class="btn btn-sm" onclick="logout()" title="Log out">Logout</button>
   </div>
 </header>
+
+<!-- ── TAB NAV ────────────────────────────────────────────────── -->
+<div class="tab-nav" id="tabNav">
+  <button class="tab-btn" id="tabBtnStocks" onclick="switchView('stocks')">Stocks</button>
+  <button class="tab-btn" id="tabBtnFunds" onclick="switchView('funds')">Mutual Funds</button>
+  <button class="tab-btn" id="tabBtnOverview" onclick="switchView('overview')">Overview</button>
+</div>
+
+<div id="viewStocks">
 
 <!-- ── IMPORT LOCAL DATA BANNER ───────────────────────────────── -->
 <div id="importLocalBanner" style="display:none;margin:0 0 16px;padding:12px 16px;background:var(--elevated);border:1px solid var(--border);border-radius:var(--r2);align-items:center;justify-content:space-between;gap:12px">
@@ -1116,6 +1151,432 @@ a{color:var(--accent);text-decoration:none}
   </div>
 </div>
 
+</div><!-- /#viewStocks -->
+
+<div id="viewFunds" style="display:none">
+  <section class="section" style="padding-bottom:40px">
+    <div class="section-hd">
+      <div class="section-title">Mutual Funds <span class="badge" id="fundCount">0</span></div>
+      <div style="display:flex;gap:8px">
+        <input type="file" id="fundPdfImportInput" accept="application/pdf" style="display:none" onchange="handleFundPdfFileSelected(event)">
+        <button class="btn btn-sm" onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
+        <button class="btn btn-sm" onclick="openNavUpdateModal()">↻ Update NAVs</button>
+        <button class="btn btn-sm" onclick="openModalForOpeningPositionFund()">+ Add Opening Position</button>
+        <button class="btn btn-sm btn-primary" onclick="openFundModal('buy')">+ Add Transaction</button>
+      </div>
+    </div>
+
+    <div class="kpi-grid" style="padding:0 0 20px" id="fundKpiGrid">
+      <div class="kpi-card" id="fundKpiInvested">
+        <div class="kpi-label">Total Invested</div>
+        <div class="kpi-val" id="fkv-invested">—</div>
+        <div class="kpi-sub">PKR</div>
+      </div>
+      <div class="kpi-card" id="fundKpiValue">
+        <div class="kpi-label">Current Value</div>
+        <div class="kpi-val" id="fkv-value">—</div>
+        <div class="kpi-sub">PKR</div>
+      </div>
+      <div class="kpi-card" id="fundKpiGain">
+        <div class="kpi-label">Unrealized Gain/Loss</div>
+        <div class="kpi-val" id="fkv-gain">—</div>
+        <div class="kpi-sub" id="fkv-gain-pct">—</div>
+      </div>
+      <div class="kpi-card" id="fundKpiNavChange">
+        <div class="kpi-label">Latest NAV Change</div>
+        <div class="kpi-val" id="fkv-navchg">—</div>
+        <div class="kpi-sub" id="fkv-navchg-fund">—</div>
+      </div>
+    </div>
+
+    <div class="charts-grid" style="margin-bottom:24px">
+      <div class="chart-card">
+        <div class="chart-title">Allocation by Fund</div>
+        <div class="chart-body"><canvas id="fundAllocChart"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Allocation by Category</div>
+        <div class="chart-body"><canvas id="fundCategoryChart"></canvas></div>
+      </div>
+      <div class="chart-card">
+        <div class="chart-title">Unrealized P&amp;L by Fund</div>
+        <div class="chart-body"><canvas id="fundPlChart"></canvas></div>
+      </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <div class="chart-title">Portfolio Value vs Invested</div>
+        <div class="chart-body"><canvas id="fundValueChart"></canvas></div>
+      </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <div class="chart-title-row" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+          <div class="chart-title" style="margin-bottom:0">NAV History</div>
+          <select id="fundNavChartPicker" class="form-input" style="font-size:12px;padding:4px 8px;width:auto" onchange="renderFundNavHistoryChart()"></select>
+        </div>
+        <div class="chart-body"><canvas id="fundNavHistoryChart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="tbl-wrap" style="margin-bottom:24px">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="text-align:left">Fund</th>
+            <th style="text-align:left">AMC</th>
+            <th style="text-align:left">Category</th>
+            <th>Units Held</th>
+            <th>Avg Cost</th>
+            <th>Current NAV</th>
+            <th style="text-align:left">NAV Date</th>
+            <th>Current Value</th>
+            <th>Unrealized P&amp;L</th>
+            <th>Weight</th>
+          </tr>
+        </thead>
+        <tbody id="fundsTbody"></tbody>
+      </table>
+    </div>
+
+    <div class="section-hd">
+      <div class="section-title">Fund Transactions <span class="badge" id="fundTxCount">0</span></div>
+    </div>
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="text-align:left">Date</th>
+            <th style="text-align:left">Type</th>
+            <th style="text-align:left">Fund</th>
+            <th>Units</th>
+            <th>NAV</th>
+            <th>Amount</th>
+            <th style="text-align:left">Notes</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody id="fundTxTbody"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── FUND TRANSACTION MODAL ──────────────────────────────── -->
+  <div class="modal-backdrop" id="fundModalBackdrop" onclick="if(event.target===this) closeFundModal()">
+    <div class="modal">
+      <div class="modal-hd">
+        <div class="modal-title" id="fundModalTitle">Buy Fund Units</div>
+        <button class="btn btn-icon btn-sm" onclick="closeFundModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group full" id="fundTypeGroup">
+            <div class="type-toggle">
+              <div class="type-btn active-buy" id="fundTypeBuyBtn" onclick="setFundTxType('buy')">▲ BUY</div>
+              <div class="type-btn" id="fundTypeSellBtn" onclick="setFundTxType('sell')">▼ SELL</div>
+              <div class="type-btn" id="fundTypeDivBtn" onclick="setFundTxType('dividend')">◆ DIVIDEND</div>
+            </div>
+            <input type="hidden" id="fFundTxType" value="buy">
+          </div>
+
+          <div class="form-group full">
+            <label class="form-label">Fund</label>
+            <select id="fFundPicker" class="form-input" onchange="onFundPickerChange()">
+              <option value="">Select a fund</option>
+              <option value="__new__">+ Add New Fund…</option>
+            </select>
+            <span class="form-error" id="errFundPicker"></span>
+          </div>
+
+          <div class="form-group full" id="newFundFields" style="display:none">
+            <div class="form-grid">
+              <!-- AMC slot: the picker and its "Other" fallback share this one grid cell
+                   (never both visible at once), so toggling between them never reflows
+                   the Fund slot beside it - see onFundAmcPickerChange(). -->
+              <div class="form-group">
+                <label class="form-label">AMC</label>
+                <select id="fFundAmcPicker" class="form-input" onchange="onFundAmcPickerChange()">
+                  <option value="">Select AMC</option>
+                </select>
+                <input type="text" id="fFundAmc" class="form-input" placeholder="AMC name" style="display:none;margin-top:6px">
+              </div>
+              <!-- Fund slot: same pattern as the AMC slot above, but full-width on its own
+                   row - fund names run long enough (e.g. "Al-Ameen Shariah Stock Fund")
+                   to truncate badly sharing a row with the AMC picker. -->
+              <div class="form-group full">
+                <label class="form-label">Fund</label>
+                <select id="fFundNamePicker" class="form-input" onchange="onFundNamePickerChange()">
+                  <option value="">Select AMC first</option>
+                </select>
+                <input type="text" id="fFundName" class="form-input" placeholder="Fund name" style="display:none;margin-top:6px">
+              </div>
+              <div class="form-group full">
+                <label class="form-label">Category</label>
+                <input type="text" id="fFundCategory" class="form-input" placeholder="Auto-filled once a fund is picked">
+              </div>
+            </div>
+            <span class="form-error" id="errFundName"></span>
+          </div>
+
+          <div class="form-group full" id="fundDivTypeGroup" style="display:none">
+            <div class="type-toggle">
+              <div class="type-btn active-buy" id="fundDivReinvestBtn" onclick="setFundDivType('reinvest')">Reinvest</div>
+              <div class="type-btn" id="fundDivCashBtn" onclick="setFundDivType('cash')">Cash</div>
+            </div>
+            <input type="hidden" id="fFundDivType" value="reinvest">
+          </div>
+
+          <div class="form-group" id="fundUnitsGroup">
+            <label class="form-label">Units</label>
+            <input type="number" id="fFundUnits" class="form-input mono no-spin" placeholder="0" min="0.0001" step="0.0001" oninput="updateFundAmountPreview(); updateFundCgtPreview()">
+            <span class="form-error" id="errFundUnits"></span>
+          </div>
+          <div class="form-group" id="fundNavGroup">
+            <label class="form-label">NAV Per Unit (PKR)</label>
+            <input type="number" id="fFundNav" class="form-input mono no-spin" placeholder="0.00" min="0.01" step="0.01" oninput="updateFundAmountPreview(); updateFundCgtPreview()">
+            <span class="form-error" id="errFundNav"></span>
+          </div>
+          <div class="form-group" id="fundLoadGroup">
+            <label class="form-label" id="fundLoadLabel">Front Load %</label>
+            <input type="number" id="fFundLoadPct" class="form-input mono no-spin" placeholder="0" min="0" max="100" step="0.01" value="0" oninput="updateFundAmountPreview()">
+          </div>
+          <div class="form-group" id="fundAmountGroup">
+            <label class="form-label">Amount (PKR)</label>
+            <input type="number" id="fFundAmount" class="form-input mono no-spin" placeholder="0.00" min="0.01" step="0.01" oninput="onFundAmountEdited()">
+          </div>
+
+          <div class="form-group full" id="fundSellHint" style="display:none">
+            <div style="background:var(--amber-bg);border:1px solid var(--amber);border-radius:var(--r);padding:10px 12px;font-size:12px;color:var(--amber);display:flex;align-items:center;justify-content:space-between">
+              <span><strong>Units held:</strong> <span id="fundUnitsHeldDisplay">0</span></span>
+              <label style="font-weight:400;display:flex;align-items:center;gap:4px"><input type="checkbox" id="fFundSellAll" onchange="onFundSellAllToggle()"> Sell all</label>
+            </div>
+          </div>
+
+          <div class="form-group" id="fundCgtGroup" style="display:none">
+            <label class="form-label">Capital Gains Tax (PKR)</label>
+            <input type="number" id="fFundCgtAmount" class="form-input mono no-spin" placeholder="0.00" min="0" step="0.01" value="0">
+            <span class="form-error" id="fundCgtHint" style="color:var(--txt3)"></span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Date</label>
+            <input type="date" id="fFundDate" class="form-input">
+            <span class="form-error" id="errFundDate"></span>
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Notes (optional)</label>
+            <input type="text" id="fFundNotes" class="form-input">
+          </div>
+        </div>
+      </div>
+      <div class="modal-ft">
+        <button class="btn" onclick="closeFundModal()">Cancel</button>
+        <button class="btn btn-primary" id="submitFundTxBtn" onclick="submitFundTransaction()">Add Buy</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── EDIT FUND TRANSACTION MODAL — Date/Notes only, same narrow scope as the
+       stock ledger's Edit Charges modal (see openEditChargesModal) - units/NAV/type
+       drive units-held validation, so changing them needs a delete+re-add instead. -->
+  <div class="modal-backdrop" id="editFundTxBackdrop" onclick="if(event.target===this) closeEditFundTxModal()">
+    <div class="modal">
+      <div class="modal-hd">
+        <div class="modal-title">Edit Fund Transaction</div>
+        <button class="btn btn-icon btn-sm" onclick="closeEditFundTxModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="eftSummary" style="font-size:12px;color:var(--txt3);margin-bottom:12px"></div>
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label">Date</label>
+            <input type="date" id="eftDate" class="form-input">
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Notes (optional)</label>
+            <input type="text" id="eftNotes" class="form-input">
+          </div>
+        </div>
+      </div>
+      <div class="modal-ft">
+        <button class="btn" onclick="closeEditFundTxModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitEditFundTx()">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── FUND PDF IMPORT REVIEW MODAL — one candidate opening position at a time,
+       mirrors the ledger's #pdfImportBackdrop wizard (see pdfImportConfirm), but each
+       confirmed row becomes a Buy with 0% load (an opening position - see
+       setFundOpeningModeUI) rather than a regular transaction, since a portfolio
+       statement reports holdings already owned, not trades made through this app. -->
+  <div class="modal-backdrop" id="fundPdfImportBackdrop">
+    <div class="modal">
+      <div class="modal-hd">
+        <div>
+          <div class="modal-title" id="pfTitle">Review Imported Fund Holding</div>
+          <div style="font-size:11px;color:var(--txt3);margin-top:2px" id="pfProgress"></div>
+        </div>
+        <button class="btn btn-icon btn-sm" onclick="closeFundPdfImport()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group full" id="pfSourceRow" style="font-size:11px;color:var(--txt3)"></div>
+
+          <div class="form-group full">
+            <label class="form-label">Fund</label>
+            <select id="pfFundPicker" class="form-input" onchange="onPfFundPickerChange()">
+              <option value="">Select a fund</option>
+              <option value="__new__">+ Add New Fund…</option>
+            </select>
+            <span class="form-error" id="errPfFundPicker"></span>
+          </div>
+
+          <div class="form-group full" id="pfNewFundFields" style="display:none">
+            <div class="form-grid">
+              <div class="form-group">
+                <label class="form-label">AMC</label>
+                <select id="pfFundAmcPicker" class="form-input" onchange="onPfFundAmcPickerChange()">
+                  <option value="">Select AMC</option>
+                </select>
+                <input type="text" id="pfFundAmc" class="form-input" placeholder="AMC name" style="display:none;margin-top:6px">
+              </div>
+              <div class="form-group full">
+                <label class="form-label">Fund</label>
+                <select id="pfFundNamePicker" class="form-input" onchange="onPfFundNamePickerChange()">
+                  <option value="">Select AMC first</option>
+                </select>
+                <input type="text" id="pfFundName" class="form-input" placeholder="Fund name" style="display:none;margin-top:6px">
+              </div>
+              <div class="form-group full">
+                <label class="form-label">Category</label>
+                <input type="text" id="pfFundCategory" class="form-input" placeholder="Auto-filled once a fund is picked">
+              </div>
+            </div>
+            <span class="form-error" id="errPfFundName"></span>
+          </div>
+
+          <div class="form-group">
+            <label class="form-label">Opening Qty</label>
+            <input type="number" id="pfUnits" class="form-input mono no-spin" step="0.0001">
+            <span class="form-error" id="errPfUnits"></span>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Avg Cost NAV (PKR)</label>
+            <input type="number" id="pfNav" class="form-input mono no-spin" step="0.01">
+            <span class="form-error" id="errPfNav"></span>
+          </div>
+          <div class="form-group">
+            <label class="form-label">Date</label>
+            <input type="date" id="pfDate" class="form-input">
+            <span class="form-error" id="errPfDate"></span>
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Notes</label>
+            <input type="text" id="pfNotes" class="form-input">
+          </div>
+        </div>
+      </div>
+      <div class="modal-ft">
+        <button class="btn" onclick="fundPdfImportPrevious()" id="pfPrevBtn">Previous</button>
+        <button class="btn" onclick="fundPdfImportSkip()">Skip</button>
+        <button class="btn btn-primary" onclick="fundPdfImportConfirm()">Confirm</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── CLEAR DATA MODAL — picks which data set(s) to wipe (stocks+cash, mutual
+       funds, or both) and re-verifies the password (POST /api/auth/verify-password)
+       before either DELETE fires, so a mis-click on the old single "Clear All Data"
+       button can't silently wipe a whole portfolio - see submitClearData(). -->
+  <div class="modal-backdrop" id="clearDataBackdrop" onclick="if(event.target===this) closeClearDataModal()">
+    <div class="modal">
+      <div class="modal-hd">
+        <div class="modal-title">Clear Data</div>
+        <button class="btn btn-icon btn-sm" onclick="closeClearDataModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="form-grid">
+          <div class="form-group full">
+            <label class="form-label">What to clear</label>
+            <label style="display:flex;align-items:center;gap:8px;margin-bottom:8px;font-weight:400;font-size:13px">
+              <input type="checkbox" id="cdStocks"> Stock Exchange (stocks + cash ledger)
+            </label>
+            <label style="display:flex;align-items:center;gap:8px;font-weight:400;font-size:13px">
+              <input type="checkbox" id="cdFunds"> Mutual Funds (funds + transactions)
+            </label>
+          </div>
+          <div class="form-group full">
+            <label class="form-label">Re-enter your password to confirm</label>
+            <input type="password" id="cdPassword" class="form-input" autocomplete="current-password">
+            <span class="form-error" id="errCdPassword"></span>
+          </div>
+        </div>
+      </div>
+      <div class="modal-ft">
+        <button class="btn" onclick="closeClearDataModal()">Cancel</button>
+        <button class="btn btn-danger" onclick="submitClearData()">Clear Selected Data</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── UPDATE NAVs MODAL — one row per fund, batched into a single
+       POST /api/funds/nav-updates call (see submitNavUpdates). -->
+  <div class="modal-backdrop" id="navUpdateBackdrop" onclick="if(event.target===this) closeNavUpdateModal()">
+    <div class="modal">
+      <div class="modal-hd">
+        <div class="modal-title">Update NAVs</div>
+        <button class="btn btn-icon btn-sm" onclick="closeNavUpdateModal()">✕</button>
+      </div>
+      <div class="modal-body">
+        <div id="navUpdateRows" style="display:flex;flex-direction:column;gap:10px"></div>
+      </div>
+      <div class="modal-ft">
+        <button class="btn" onclick="closeNavUpdateModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitNavUpdates()">Save All</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="viewOverview" style="display:none">
+  <section class="section" style="padding-bottom:40px">
+    <div class="section-hd">
+      <div class="section-title">Overview</div>
+    </div>
+
+    <div class="kpi-grid" style="padding:0 0 20px" id="overviewKpiGrid">
+      <div class="kpi-card" id="ovKpiNetWorth">
+        <div class="kpi-label">Net Worth</div>
+        <div class="kpi-val" id="ov-networth">—</div>
+        <div class="kpi-sub">PKR — stocks + funds + free cash</div>
+      </div>
+      <div class="kpi-card" id="ovKpiStocks">
+        <div class="kpi-label">Stocks Value</div>
+        <div class="kpi-val" id="ov-stocks">—</div>
+        <div class="kpi-sub">PKR</div>
+      </div>
+      <div class="kpi-card" id="ovKpiFunds">
+        <div class="kpi-label">Funds Value</div>
+        <div class="kpi-val" id="ov-funds">—</div>
+        <div class="kpi-sub">PKR</div>
+      </div>
+      <div class="kpi-card" id="ovKpiGain">
+        <div class="kpi-label">Total Gain/Loss</div>
+        <div class="kpi-val" id="ov-gain">—</div>
+        <div class="kpi-sub" id="ov-gain-pct">—</div>
+      </div>
+    </div>
+
+    <div class="charts-grid">
+      <div class="chart-card">
+        <div class="chart-title">Stocks vs Mutual Funds</div>
+        <div class="chart-body"><canvas id="ovAllocChart"></canvas></div>
+      </div>
+      <div class="chart-card" style="grid-column:1/-1">
+        <div class="chart-title">Combined Portfolio Value Over Time</div>
+        <div class="chart-body"><canvas id="ovValueChart"></canvas></div>
+      </div>
+    </div>
+  </section>
+</div>
+
 <!-- ── ADD TRANSACTION MODAL ──────────────────────────────────── -->
 <div class="modal-backdrop" id="modalBackdrop" onclick="handleBackdropClick(event)">
   <div class="modal">
@@ -1329,13 +1790,34 @@ a{color:var(--accent);text-decoration:none}
     </div>
 
     <div class="settings-section">
+      <div class="settings-label">Backup</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
+        A full JSON snapshot of both stocks and mutual funds - transactions, cash ledger,
+        settings, funds and fund transactions. Restoring re-adds every record through the
+        same validated endpoints as adding them by hand, so it can't corrupt existing data
+        - but re-imported stock buys/sells don't re-touch free cash (same as a bulk/PDF
+        import), so restoring onto an account that already has cash entries will double
+        them unless you clear cash first.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn" style="width:100%;justify-content:center" onclick="exportBackup()">
+          ⬇ Export Backup (JSON)
+        </button>
+        <input type="file" id="backupImportInput" accept="application/json" style="display:none" onchange="handleBackupFileSelected(event)">
+        <button class="btn" style="width:100%;justify-content:center" onclick="document.getElementById('backupImportInput').click()">
+          ⬆ Import Backup (JSON)
+        </button>
+      </div>
+    </div>
+
+    <div class="settings-section">
       <div class="settings-label">Data</div>
       <div style="display:flex;flex-direction:column;gap:8px">
         <button class="btn" style="width:100%;justify-content:center" onclick="loadSampleData()">
           📊 Reset to CDC Import
         </button>
-        <button class="btn btn-danger" style="width:100%;justify-content:center" onclick="confirmClearAll()">
-          🗑 Clear All Data
+        <button class="btn btn-danger" style="width:100%;justify-content:center" onclick="openClearDataModal()">
+          🗑 Clear Data…
         </button>
       </div>
     </div>
@@ -1375,6 +1857,153 @@ const CHART_PALETTE = [
   '#0369a1','#be5000','#047481','#1e40af','#065f46',
   '#7c3aed','#9f1239'
 ];
+
+// Major Pakistani AMCs and their flagship open-end funds, for the AMC -> Fund picker in
+// the "Add New Fund" form (see onFundAmcPickerChange/onFundNamePickerChange). Sourced
+// from MUFAP member listings and each AMC's own site - NOT exhaustive (MUFAP lists 500+
+// schemes across smaller AMCs, closed-end plans, and pension sub-funds), just the
+// flagship funds an individual investor is most likely to actually hold. Every picker
+// built from this also gets an "Other (type manually)" escape hatch at both the AMC and
+// fund level, so a fund missing from this list is never a dead end.
+const AMC_FUNDS = {
+  'Al Meezan Investment Management Limited': [
+    'Meezan Islamic Fund', 'Al Meezan Mutual Fund', 'Meezan Balanced Fund',
+    'Meezan Islamic Income Fund', 'Meezan Cash Fund', 'Meezan Sovereign Fund',
+    'KSE Meezan Index Fund', 'Meezan Asset Allocation Fund', 'Meezan Energy Fund',
+    'Meezan Rozana Amdani Fund', 'Meezan Gold Fund', 'Meezan Dedicated Equity Fund'
+  ],
+  'NBP Fund Management Limited': [
+    'NBP Stock Fund', 'NBP Money Market Fund', 'NBP Savings Fund',
+    'NBP Income Opportunity Fund', 'NBP Sarmaya Izafa Fund', 'NBP Balanced Fund',
+    'NBP Financial Sector Fund', 'NBP Government Securities Savings Fund',
+    'NBP Islamic Stock Fund', 'NBP Islamic Money Market Fund', 'NBP Islamic Savings Fund',
+    'NBP Islamic Sarmaya Izafa Fund', 'NBP Islamic Energy Fund',
+    'NBP Pakistan Growth Exchange Traded Fund'
+  ],
+  'UBL Fund Managers Limited': [
+    'UBL Stock Advantage Fund', 'UBL Money Market Fund', 'UBL Liquidity Plus Fund',
+    'UBL Growth and Income Fund', 'UBL Retirement Savings Fund', 'UBL Government Securities Fund',
+    'Al-Ameen Shariah Stock Fund', 'Al-Ameen Islamic Cash Fund', 'Al-Ameen Islamic Sovereign Fund',
+    'Al-Ameen Islamic Aggressive Income Fund', 'Al-Ameen Islamic Dedicated Equity Fund',
+    'Al-Ameen Islamic Retirement Savings Fund', 'Al-Ameen Islamic Asset Allocation Fund',
+    'Al-Ameen Islamic Energy Fund'
+  ],
+  'HBL Asset Management Limited': [
+    'HBL Stock Fund', 'HBL Equity Fund', 'HBL Growth Fund', 'HBL Money Market Fund',
+    'HBL Cash Fund', 'HBL Income Fund', 'HBL Government Securities Fund',
+    'HBL Financial Sector Income Fund', 'HBL Multi Asset Fund',
+    'HBL Islamic Stock Fund', 'HBL Islamic Equity Fund', 'HBL Islamic Money Market Fund',
+    'HBL Islamic Income Fund', 'HBL Islamic Asset Allocation Fund', 'HBL Islamic Dedicated Equity Fund'
+  ],
+  'MCB Investment Management Limited': [
+    'MCB Pakistan Stock Market Fund', 'MCB Cash Management Optimizer',
+    'MCB Pakistan Asset Allocation Fund', 'MCB Pakistan Sovereign Fund',
+    'MCB Pakistan Income Fund', 'MCB Pakistan Frequent Payout Fund',
+    'Alhamra Islamic Stock Fund', 'Alhamra Islamic Income Fund',
+    'Alhamra Islamic Money Market Fund', 'Alhamra Islamic Asset Allocation Fund'
+  ],
+  'ABL Asset Management Company Limited': [
+    'ABL Stock Fund', 'ABL Cash Fund', 'ABL Income Fund', 'ABL Government Securities Fund',
+    'ABL Financial Planning Fund', 'ABL Islamic Stock Fund', 'ABL Islamic Cash Fund',
+    'ABL Islamic Income Fund', 'ABL Islamic Dedicated Stock Fund', 'ABL Islamic Financial Planning Fund'
+  ],
+  'Alfalah Asset Management Limited': [
+    'Alfalah GHP Stock Fund', 'Alfalah GHP Value Fund', 'Alfalah GHP Cash Fund',
+    'Alfalah GHP Income Fund', 'Alfalah GHP Money Market Fund', 'Alfalah GHP Alpha Fund',
+    'Alfalah GHP Islamic Stock Fund', 'Alfalah GHP Islamic Income Fund',
+    'Alfalah GHP Islamic Cash Fund', 'Alfalah GHP Islamic Asset Allocation Fund'
+  ],
+  'Faysal Asset Management Limited': [
+    'Faysal Stock Fund', 'Faysal MTS Fund', 'Faysal Savings Growth Fund',
+    'Faysal Money Market Fund', 'Faysal Income & Growth Fund', 'Faysal Asset Allocation Fund',
+    'Faysal Islamic Stock Fund', 'Faysal Islamic Savings Growth Fund', 'Faysal Islamic Cash Fund'
+  ],
+  'Atlas Asset Management Limited': [
+    'Atlas Stock Market Fund', 'Atlas Money Market Fund', 'Atlas Income Fund',
+    'Atlas Pension Fund', 'Atlas Islamic Stock Fund', 'Atlas Islamic Income Fund',
+    'Atlas Islamic Money Market Fund'
+  ],
+  'JS Investments Limited': [
+    'JS Growth Fund', 'JS Value Fund', 'JS Large Cap Fund', 'JS Cash Fund', 'JS Income Fund',
+    'JS Islamic Fund', 'JS Islamic Income Fund', 'JS Islamic Dedicated Equity Fund'
+  ],
+  'National Investment Trust Limited': [
+    'NI(U)T Fund', 'NIT State Enterprise Fund', 'NIT Government Bond Fund', 'NIT Income Fund',
+    'NIT Money Market Fund', 'NIT Islamic Equity Fund', 'NIT Islamic Money Market Fund'
+  ]
+};
+
+// Flat fund-name -> category lookup (MUFAP-style classification), keyed to exactly the
+// fund names in AMC_FUNDS above. Drives the auto-fill in onFundNamePickerChange() - picking
+// a known fund fills Category for you; picking "Other" leaves it blank for manual entry,
+// same escape hatch as the AMC/Fund pickers themselves.
+const FUND_CATEGORY = {
+  'Meezan Islamic Fund': 'Islamic Equity', 'Al Meezan Mutual Fund': 'Islamic Equity',
+  'Meezan Balanced Fund': 'Islamic Balanced', 'Meezan Islamic Income Fund': 'Islamic Income',
+  'Meezan Cash Fund': 'Islamic Money Market', 'Meezan Sovereign Fund': 'Islamic Income',
+  'KSE Meezan Index Fund': 'Islamic Index Fund', 'Meezan Asset Allocation Fund': 'Islamic Asset Allocation',
+  'Meezan Energy Fund': 'Islamic Equity', 'Meezan Rozana Amdani Fund': 'Islamic Money Market',
+  'Meezan Gold Fund': 'Shariah Compliant Commodity', 'Meezan Dedicated Equity Fund': 'Islamic Equity',
+
+  'NBP Stock Fund': 'Equity', 'NBP Money Market Fund': 'Money Market', 'NBP Savings Fund': 'Income',
+  'NBP Income Opportunity Fund': 'Income', 'NBP Sarmaya Izafa Fund': 'Asset Allocation',
+  'NBP Balanced Fund': 'Balanced', 'NBP Financial Sector Fund': 'Equity',
+  'NBP Government Securities Savings Fund': 'Income', 'NBP Islamic Stock Fund': 'Islamic Equity',
+  'NBP Islamic Money Market Fund': 'Islamic Money Market', 'NBP Islamic Savings Fund': 'Islamic Income',
+  'NBP Islamic Sarmaya Izafa Fund': 'Islamic Asset Allocation', 'NBP Islamic Energy Fund': 'Islamic Equity',
+  'NBP Pakistan Growth Exchange Traded Fund': 'ETF',
+
+  'UBL Stock Advantage Fund': 'Equity', 'UBL Money Market Fund': 'Money Market',
+  'UBL Liquidity Plus Fund': 'Money Market', 'UBL Growth and Income Fund': 'Balanced',
+  'UBL Retirement Savings Fund': 'Pension', 'UBL Government Securities Fund': 'Income',
+  'Al-Ameen Shariah Stock Fund': 'Islamic Equity', 'Al-Ameen Islamic Cash Fund': 'Islamic Money Market',
+  'Al-Ameen Islamic Sovereign Fund': 'Islamic Income', 'Al-Ameen Islamic Aggressive Income Fund': 'Islamic Income',
+  'Al-Ameen Islamic Dedicated Equity Fund': 'Islamic Equity', 'Al-Ameen Islamic Retirement Savings Fund': 'Islamic Pension',
+  'Al-Ameen Islamic Asset Allocation Fund': 'Islamic Asset Allocation', 'Al-Ameen Islamic Energy Fund': 'Islamic Equity',
+
+  'HBL Stock Fund': 'Equity', 'HBL Equity Fund': 'Equity', 'HBL Growth Fund': 'Equity',
+  'HBL Money Market Fund': 'Money Market', 'HBL Cash Fund': 'Money Market', 'HBL Income Fund': 'Income',
+  'HBL Government Securities Fund': 'Income', 'HBL Financial Sector Income Fund': 'Income',
+  'HBL Multi Asset Fund': 'Balanced', 'HBL Islamic Stock Fund': 'Islamic Equity',
+  'HBL Islamic Equity Fund': 'Islamic Equity', 'HBL Islamic Money Market Fund': 'Islamic Money Market',
+  'HBL Islamic Income Fund': 'Islamic Income', 'HBL Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  'HBL Islamic Dedicated Equity Fund': 'Islamic Equity',
+
+  'MCB Pakistan Stock Market Fund': 'Equity', 'MCB Cash Management Optimizer': 'Money Market',
+  'MCB Pakistan Asset Allocation Fund': 'Asset Allocation', 'MCB Pakistan Sovereign Fund': 'Income',
+  'MCB Pakistan Income Fund': 'Income', 'MCB Pakistan Frequent Payout Fund': 'Asset Allocation',
+  'Alhamra Islamic Stock Fund': 'Islamic Equity', 'Alhamra Islamic Income Fund': 'Islamic Income',
+  'Alhamra Islamic Money Market Fund': 'Islamic Money Market', 'Alhamra Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+
+  'ABL Stock Fund': 'Equity', 'ABL Cash Fund': 'Money Market', 'ABL Income Fund': 'Income',
+  'ABL Government Securities Fund': 'Income', 'ABL Financial Planning Fund': 'Fund of Funds',
+  'ABL Islamic Stock Fund': 'Islamic Equity', 'ABL Islamic Cash Fund': 'Islamic Money Market',
+  'ABL Islamic Income Fund': 'Islamic Income', 'ABL Islamic Dedicated Stock Fund': 'Islamic Equity',
+  'ABL Islamic Financial Planning Fund': 'Islamic Fund of Funds',
+
+  'Alfalah GHP Stock Fund': 'Equity', 'Alfalah GHP Value Fund': 'Equity', 'Alfalah GHP Cash Fund': 'Money Market',
+  'Alfalah GHP Income Fund': 'Income', 'Alfalah GHP Money Market Fund': 'Money Market',
+  'Alfalah GHP Alpha Fund': 'Equity', 'Alfalah GHP Islamic Stock Fund': 'Islamic Equity',
+  'Alfalah GHP Islamic Income Fund': 'Islamic Income', 'Alfalah GHP Islamic Cash Fund': 'Islamic Money Market',
+  'Alfalah GHP Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+
+  'Faysal Stock Fund': 'Equity', 'Faysal MTS Fund': 'Income', 'Faysal Savings Growth Fund': 'Income',
+  'Faysal Money Market Fund': 'Money Market', 'Faysal Income & Growth Fund': 'Income',
+  'Faysal Asset Allocation Fund': 'Asset Allocation', 'Faysal Islamic Stock Fund': 'Islamic Equity',
+  'Faysal Islamic Savings Growth Fund': 'Islamic Income', 'Faysal Islamic Cash Fund': 'Islamic Money Market',
+
+  'Atlas Stock Market Fund': 'Equity', 'Atlas Money Market Fund': 'Money Market', 'Atlas Income Fund': 'Income',
+  'Atlas Pension Fund': 'Pension', 'Atlas Islamic Stock Fund': 'Islamic Equity',
+  'Atlas Islamic Income Fund': 'Islamic Income', 'Atlas Islamic Money Market Fund': 'Islamic Money Market',
+
+  'JS Growth Fund': 'Equity', 'JS Value Fund': 'Equity', 'JS Large Cap Fund': 'Equity',
+  'JS Cash Fund': 'Money Market', 'JS Income Fund': 'Income', 'JS Islamic Fund': 'Islamic Equity',
+  'JS Islamic Income Fund': 'Islamic Income', 'JS Islamic Dedicated Equity Fund': 'Islamic Equity',
+
+  'NI(U)T Fund': 'Equity', 'NIT State Enterprise Fund': 'Equity', 'NIT Government Bond Fund': 'Income',
+  'NIT Income Fund': 'Income', 'NIT Money Market Fund': 'Money Market',
+  'NIT Islamic Equity Fund': 'Islamic Equity', 'NIT Islamic Money Market Fund': 'Islamic Money Market'
+};
 
 // CDC Account Balance Report — Mr. SARFRAZ AHMED — 25/06/2026
 // Buy price set to 1.00 PKR as placeholder. Delete each entry and
@@ -1626,6 +2255,9 @@ let state = {
   // series used to value past holdings at what they were actually worth on that date.
   priceHistory: {},
   cash: { balance: 0, entries: [] },
+  // Mutual funds - deliberately separate from transactions/cash above (no shared keys,
+  // no FK link on the backend either), so a bug here can't corrupt stock data.
+  funds: { funds: [], transactions: [], navHistory: {} },
   index: null, // { value, change, changePct } for KSE100, or null until first fetched
   marketVolume: null, // { volume, value } total shares/PKR traded across PSX today, or null until first fetched
   // Per-table "show all" toggles (Transaction History / Realized P&L / Cash Ledger) -
@@ -1667,12 +2299,13 @@ const INDEX_CACHE_KEY = 'psxIndexCache_v1';
 async function loadState() {
   loadPricesCache();
   try {
-    const [ledgerRes, settingsRes, cashRes] = await Promise.all([
+    const [ledgerRes, settingsRes, cashRes, fundsRes] = await Promise.all([
       fetch('/api/ledger', { credentials: 'include' }),
       fetch('/api/settings', { credentials: 'include' }),
-      fetch('/api/cash', { credentials: 'include' })
+      fetch('/api/cash', { credentials: 'include' }),
+      fetch('/api/funds', { credentials: 'include' })
     ]);
-    if (ledgerRes.status === 401 || settingsRes.status === 401 || cashRes.status === 401) {
+    if (ledgerRes.status === 401 || settingsRes.status === 401 || cashRes.status === 401 || fundsRes.status === 401) {
       location.href = '/login.html';
       return false;
     }
@@ -1694,6 +2327,23 @@ async function loadState() {
     state.cash = {
       balance: parseFloat(cashData.balance) || 0,
       entries: cashData.entries.map(c => ({ ...c, amount: parseFloat(c.amount) }))
+    };
+    const fundsData = await fundsRes.json();
+    state.funds = {
+      funds: fundsData.funds.map(f => ({ ...f, currentNav: parseFloat(f.currentNav) })),
+      transactions: fundsData.transactions.map(t => ({
+        ...t,
+        units: parseFloat(t.units),
+        nav: parseFloat(t.nav),
+        amount: parseFloat(t.amount),
+        frontLoadPct: parseFloat(t.frontLoadPct) || 0,
+        backLoadPct: parseFloat(t.backLoadPct) || 0,
+        cgtAmount: t.cgtAmount != null ? parseFloat(t.cgtAmount) : null
+      })),
+      navHistory: Object.fromEntries(
+        Object.entries(fundsData.navHistory || {}).map(([fundId, points]) =>
+          [fundId, points.map(p => ({ date: p.date, nav: parseFloat(p.nav) }))])
+      )
     };
   } catch(e) {
     console.warn('State load error', e);
@@ -4753,6 +5403,8 @@ function renderAll() {
   renderCashLedger();
   renderTaxReport();
   renderSettingsUI();
+  renderFundsView();
+  renderOverviewView();
   updateHeaderOwnerName();
 }
 
@@ -5994,22 +6646,73 @@ async function loadSampleData() {
   closeSettings();
 }
 
-async function confirmClearAll() {
-  if (confirm('Clear ALL portfolio data (including the cash ledger)? This cannot be undone.')) {
-    const res = await fetch('/api/ledger', { method: 'DELETE', credentials: 'include' });
-    if (!res.ok) { toast('Could not clear data', 'error'); return; }
-    const cashRes = await fetch('/api/cash', { method: 'DELETE', credentials: 'include' });
-    if (!cashRes.ok) { toast('Could not clear cash ledger', 'error'); return; }
-    state.transactions = [];
-    state.cash = { balance: 0, entries: [] };
-    state.prices = {};
-    state.settings.manualPrices = {};
-    savePricesCache();
-    await pushSettings(cloneSettings());
+function openClearDataModal() {
+  document.getElementById('cdStocks').checked = false;
+  document.getElementById('cdFunds').checked = false;
+  document.getElementById('cdPassword').value = '';
+  setText('errCdPassword', '');
+  document.getElementById('clearDataBackdrop').classList.add('open');
+}
+
+function closeClearDataModal() {
+  document.getElementById('clearDataBackdrop').classList.remove('open');
+}
+
+async function submitClearData() {
+  setText('errCdPassword', '');
+  const clearStocks = document.getElementById('cdStocks').checked;
+  const clearFunds = document.getElementById('cdFunds').checked;
+  const password = document.getElementById('cdPassword').value;
+
+  if (!clearStocks && !clearFunds) {
+    toast('Select at least one data set to clear', 'error');
+    return;
+  }
+  if (!password) {
+    setText('errCdPassword', 'Password required');
+    return;
+  }
+
+  const label = [clearStocks && 'Stock Exchange', clearFunds && 'Mutual Funds'].filter(Boolean).join(' and ');
+  if (!confirm(`Clear ${label} data? This cannot be undone.`)) return;
+
+  try {
+    const verifyRes = await fetch('/api/auth/verify-password', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password })
+    });
+    if (!verifyRes.ok) {
+      setText('errCdPassword', 'Incorrect password');
+      return;
+    }
+
+    if (clearStocks) {
+      const res = await fetch('/api/ledger', { method: 'DELETE', credentials: 'include' });
+      if (!res.ok) { toast('Could not clear stock data', 'error'); return; }
+      const cashRes = await fetch('/api/cash', { method: 'DELETE', credentials: 'include' });
+      if (!cashRes.ok) { toast('Could not clear cash ledger', 'error'); return; }
+      state.transactions = [];
+      state.cash = { balance: 0, entries: [] };
+      state.prices = {};
+      state.settings.manualPrices = {};
+      savePricesCache();
+      await pushSettings(cloneSettings());
+      document.getElementById('statusDot').className = 'status-dot';
+      document.getElementById('lastUpdated').textContent = 'Not fetched';
+    }
+
+    if (clearFunds) {
+      const res = await fetch('/api/funds', { method: 'DELETE', credentials: 'include' });
+      if (!res.ok) { toast('Could not clear fund data', 'error'); return; }
+      state.funds = { funds: [], transactions: [], navHistory: {} };
+    }
+
+    closeClearDataModal();
     renderAll();
-    toast('All data cleared', 'warning');
-    document.getElementById('statusDot').className = 'status-dot';
-    document.getElementById('lastUpdated').textContent = 'Not fetched';
+    toast(`${label} data cleared`, 'warning');
+  } catch (e) {
+    toast('Network error — could not clear data', 'error');
   }
 }
 
@@ -6049,6 +6752,215 @@ function exportCSV() {
   a.click();
   URL.revokeObjectURL(url);
   toast(`Exported ${state.transactions.length} transactions`, 'success');
+}
+
+/* ══════════════════════════════════════════════════════
+   JSON BACKUP EXPORT / IMPORT — stocks + funds combined, unlike exportCSV() above
+   (transactions only). See the Backup section in Settings for the cash-entry caveat
+   this import path lives with (explained inline below, at the manualCash filter).
+══════════════════════════════════════════════════════ */
+function exportBackup() {
+  const backup = {
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    transactions: state.transactions,
+    cash: state.cash.entries,
+    settings: state.settings,
+    funds: state.funds.funds,
+    fundTransactions: state.funds.transactions,
+    fundNavHistory: state.funds.navHistory
+  };
+  const json = JSON.stringify(backup, null, 2);
+  const blob = new Blob([json], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `psx-backup-${new Date().toISOString().split('T')[0]}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('Backup exported', 'success');
+}
+
+async function handleBackupFileSelected(event) {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch (e) {
+    toast('Not a valid JSON file', 'error');
+    return;
+  }
+  if (!data || typeof data !== 'object' || !Array.isArray(data.transactions)) {
+    toast('Not a recognized backup file', 'error');
+    return;
+  }
+
+  const fundCount = Array.isArray(data.funds) ? data.funds.length : 0;
+  const cashCount = (data.cash || []).filter(c => !c.ledgerEntryId).length;
+  const summary = `${data.transactions.length} stock transaction(s), ${cashCount} cash entr${cashCount === 1 ? 'y' : 'ies'}, ${fundCount} fund(s).`;
+  if (!confirm(`Import this backup?\n\n${summary}\n\nThis ADDS records on top of what's already here - it doesn't replace anything. Imported stock buys/sells won't re-touch free cash (see the Backup note in Settings), so importing onto an account that already has data may need a manual cleanup pass afterward. Continue?`)) return;
+
+  await importBackup(data);
+}
+
+async function importBackup(data) {
+  let ledgerImported = 0, cashImported = 0, fundsImported = 0, fundTxImported = 0;
+
+  try {
+    // ── Stock transactions ── the existing bulk endpoint, skipCashEntry always true on
+    // a restore: a fresh import gets new row IDs, so the original buy/sell <-> cash
+    // links can't be reconstructed - every restored trade is treated like an opening
+    // position instead (same as a bulk/PDF import), and cash movements are restored
+    // separately below from the manual (non-linked) cash entries only.
+    if (data.transactions.length > 0) {
+      const payload = {
+        transactions: data.transactions.map(t => ({
+          type: t.type, symbol: t.symbol, sector: t.sector, shares: t.shares, price: t.price,
+          commission: t.commission, nccplCharge: t.nccplCharge, date: t.date, notes: t.notes,
+          skipCashEntry: true, splitRatioTo: t.splitRatioTo, splitRatioFrom: t.splitRatioFrom
+        }))
+      };
+      const res = await fetch('/api/ledger/import', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) {
+        const result = await res.json();
+        ledgerImported = result.imported;
+        if (result.skipped?.length) {
+          console.warn('Skipped stock transactions on import:', result.skipped);
+          toast(`${result.skipped.length} stock transaction(s) skipped — see console`, 'warning');
+        }
+      } else {
+        toast('Could not import stock transactions', 'error');
+      }
+    }
+
+    // ── Cash entries ── only manual entries (no LedgerEntryId - those are handled by
+    // the ledger import above) and never a synthetic offsetting withdrawal (LinkedEntryId
+    // set on a withdrawal row) - re-posting its paired dividend with creditToCash:false
+    // below makes the server recreate that exact pair itself (see POST /api/cash), so
+    // importing the original offsetting row too would duplicate it.
+    const cashEntries = data.cash || [];
+    const offsettingWithdrawalIds = new Set(
+      cashEntries.filter(c => c.type === 'withdrawal' && c.linkedEntryId != null).map(c => c.id)
+    );
+    const dividendHasOffset = new Set(
+      cashEntries.filter(c => c.type === 'withdrawal' && c.linkedEntryId != null).map(c => c.linkedEntryId)
+    );
+    const manualCash = cashEntries.filter(c => !c.ledgerEntryId && !offsettingWithdrawalIds.has(c.id));
+
+    for (const c of manualCash) {
+      const payload = { type: c.type, date: c.date, notes: c.notes, symbol: c.symbol };
+      if (c.type === 'dividend') {
+        payload.grossAmount = c.grossAmount;
+        payload.taxRatePct = c.taxRatePct;
+        payload.creditToCash = !dividendHasOffset.has(c.id);
+      } else if (c.type === 'deposit' && c.cdcHoldAmount != null) {
+        payload.grossAmount = c.grossAmount;
+        payload.cdcHoldAmount = c.cdcHoldAmount;
+      } else {
+        payload.amount = c.amount;
+      }
+      const res = await fetch('/api/cash', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) cashImported++;
+    }
+
+    // ── Mutual funds ── create each fund, then replay its transactions chronologically
+    // (the server recomputes Amount from Units/Nav/load% exactly as it did originally,
+    // so this reproduces the same numbers), then restore its full NAV history in one
+    // batch so staleness and the NAV history chart come back too, not just today's NAV.
+    const fundIdMap = {};
+    for (const f of (data.funds || [])) {
+      const res = await fetch('/api/funds/funds', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: f.name, amc: f.amc, category: f.category, currentNav: f.currentNav, navDate: f.navUpdatedAt })
+      });
+      if (res.ok) {
+        const created = await res.json();
+        fundIdMap[f.id] = created.id;
+        fundsImported++;
+      }
+    }
+
+    const fundTxs = [...(data.fundTransactions || [])].sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+    for (const t of fundTxs) {
+      const newFundId = fundIdMap[t.fundId];
+      if (newFundId == null) continue;
+
+      let endpoint, payload;
+      if (t.type === 'buy') {
+        endpoint = '/api/funds/transactions/buy';
+        payload = { fundId: newFundId, date: t.date, units: t.units, nav: t.nav, frontLoadPct: t.frontLoadPct, notes: t.notes };
+      } else if (t.type === 'sell') {
+        endpoint = '/api/funds/transactions/sell';
+        payload = { fundId: newFundId, date: t.date, units: t.units, nav: t.nav, backLoadPct: t.backLoadPct, notes: t.notes };
+      } else if (t.type === 'dividendreinvest') {
+        endpoint = '/api/funds/transactions/dividend';
+        payload = { fundId: newFundId, date: t.date, type: 'reinvest', units: t.units, nav: t.nav, notes: t.notes };
+      } else if (t.type === 'dividendcash') {
+        endpoint = '/api/funds/transactions/dividend';
+        payload = { fundId: newFundId, date: t.date, type: 'cash', amount: t.amount, notes: t.notes };
+      } else {
+        continue;
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (res.ok) fundTxImported++;
+    }
+
+    const navUpdates = [];
+    for (const [oldFundId, points] of Object.entries(data.fundNavHistory || {})) {
+      const newFundId = fundIdMap[oldFundId];
+      if (newFundId == null) continue;
+      for (const p of points) navUpdates.push({ fundId: newFundId, nav: p.nav, date: p.date });
+    }
+    if (navUpdates.length > 0) {
+      await fetch('/api/funds/nav-updates', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates: navUpdates })
+      });
+    }
+
+    // ── Settings ──
+    if (data.settings) {
+      await fetch('/api/settings', {
+        method: 'PUT', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          costMethod: data.settings.costMethod,
+          includeCommission: data.settings.includeCommission,
+          manualPrices: data.settings.manualPrices,
+          dividendTaxRatePct: data.settings.dividendTaxRatePct,
+          ownerName: data.settings.ownerName,
+          cgtRatePct: data.settings.cgtRatePct,
+          nccplChargeRatePct: data.settings.nccplChargeRatePct
+        })
+      });
+    }
+
+    await loadState();
+    renderAll();
+    toast(`Imported ${ledgerImported} stock tx, ${cashImported} cash entries, ${fundsImported} funds, ${fundTxImported} fund tx`, 'success');
+  } catch (e) {
+    toast('Network error during import — some records may have been partially imported', 'error');
+    await loadState();
+    renderAll();
+  }
 }
 
 /* ══════════════════════════════════════════════════════
@@ -6279,8 +7191,1442 @@ async function importLocalData() {
 }
 
 /* ══════════════════════════════════════════════════════
+   MUTUAL FUNDS
+   Deliberately reads/writes only state.funds - never touches state.transactions or
+   state.cash, mirroring the backend's lack of any FK link between the two (see
+   Program.cs's /api/funds group).
+══════════════════════════════════════════════════════ */
+
+// Mirrors the backend's FundHoldingsCalculator.UnitsHeld exactly - a chronological walk
+// (not a flat aggregate) so it stays correct even though funds don't split (kept the same
+// shape as HoldingsCalculator/getAvailableShares regardless, for consistency).
+function fundUnitsHeld(fundId, excludeId = null) {
+  const sorted = state.funds.transactions
+    .filter(t => t.fundId === fundId && t.id !== excludeId)
+    .slice()
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+  let running = 0;
+  for (const t of sorted) {
+    if (t.type === 'buy' || t.type === 'dividendreinvest') running += t.units;
+    else if (t.type === 'sell') running -= t.units;
+  }
+  return Math.max(0, running);
+}
+
+// Weighted-average cost, realized P&L, and dividend income per fund - the funds
+// equivalent of computeHoldingsWA()/computeRealizedPL() for stocks. Funds never split
+// and this app only ever uses WA for them (confirmed - no FIFO variant needed), so
+// unlike stocks this is one function instead of two cost-method branches.
+function computeFundHoldings() {
+  const holdings = {};
+  const sorted = [...state.funds.transactions].sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+
+  for (const tx of sorted) {
+    const fid = tx.fundId;
+    if (!holdings[fid]) holdings[fid] = { fundId: fid, units: 0, avgCost: 0, realizedPL: 0, dividends: 0 };
+    const h = holdings[fid];
+
+    if (tx.type === 'buy' || tx.type === 'dividendreinvest') {
+      const newUnits = h.units + tx.units;
+      h.avgCost = newUnits > 0 ? (h.avgCost * h.units + tx.amount) / newUnits : 0;
+      h.units = newUnits;
+    } else if (tx.type === 'sell') {
+      // avgCost is left unchanged on a sell (WA convention, same as computeHoldingsWA) -
+      // only the cost basis carried by the sold units is removed from realized P&L's
+      // reference point, not the average itself.
+      h.realizedPL += tx.amount - h.avgCost * tx.units;
+      h.units = Math.max(0, h.units - tx.units);
+    } else if (tx.type === 'dividendcash') {
+      h.dividends += tx.amount;
+    }
+  }
+
+  for (const fid in holdings) {
+    const h = holdings[fid];
+    const fund = state.funds.funds.find(f => f.id === Number(fid));
+    h.totalInvested = h.units * h.avgCost;
+    h.currentValue = fund ? h.units * fund.currentNav : 0;
+    h.unrealizedPL = h.currentValue - h.totalInvested;
+    h.unrealizedPLPct = h.totalInvested > 0 ? (h.unrealizedPL / h.totalInvested) * 100 : 0;
+    h.totalReturnPct = h.totalInvested > 0 ? ((h.unrealizedPL + h.realizedPL + h.dividends) / h.totalInvested) * 100 : 0;
+  }
+
+  return holdings;
+}
+
+// Point-in-time version of computeFundHoldings() - units/avgCost as they stood at the
+// end of `cutoffDate`, replaying only transactions up to and including that date. Feeds
+// the Portfolio Value vs Invested chart, which needs a snapshot at each historical NAV
+// date, not just today's final numbers.
+function computeFundHoldingsAsOf(cutoffDate) {
+  const holdings = {};
+  const sorted = state.funds.transactions
+    .filter(t => t.date <= cutoffDate)
+    .slice()
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+
+  for (const tx of sorted) {
+    const fid = tx.fundId;
+    if (!holdings[fid]) holdings[fid] = { units: 0, avgCost: 0 };
+    const h = holdings[fid];
+    if (tx.type === 'buy' || tx.type === 'dividendreinvest') {
+      const newUnits = h.units + tx.units;
+      h.avgCost = newUnits > 0 ? (h.avgCost * h.units + tx.amount) / newUnits : 0;
+      h.units = newUnits;
+    } else if (tx.type === 'sell') {
+      h.units = Math.max(0, h.units - tx.units);
+    }
+  }
+  return holdings;
+}
+
+// Forward-filled NAV for a fund as of a given date - the latest recorded NAV history
+// point on or before that date. Falls back to the fund's current NAV if no history
+// point that old exists yet (best available approximation before any NAV was ever
+// recorded for it).
+function navAsOfDate(fundId, date) {
+  const history = state.funds.navHistory[fundId] || [];
+  const upToDate = history.filter(h => h.date <= date).sort((a, b) => new Date(b.date) - new Date(a.date));
+  if (upToDate.length) return upToDate[0].nav;
+  const fund = state.funds.funds.find(f => f.id === Number(fundId));
+  return fund ? fund.currentNav : 0;
+}
+
+// Portfolio-wide value vs. invested over time, one point per date any fund has a NAV
+// history entry. Only produces a real curve from whenever NAV history starts being
+// recorded forward - there's no way to know past NAVs before the user starts entering
+// them (see the plan's own note on this - not a bug, an inherent data limit).
+function computePortfolioValueSeries() {
+  const allDates = [...new Set(Object.values(state.funds.navHistory).flat().map(p => p.date))].sort();
+  return allDates.map(date => {
+    const holdings = computeFundHoldingsAsOf(date);
+    let value = 0, invested = 0;
+    for (const fid in holdings) {
+      const h = holdings[fid];
+      if (h.units <= 1e-9) continue;
+      value += h.units * navAsOfDate(fid, date);
+      invested += h.units * h.avgCost;
+    }
+    return { date, value, invested };
+  });
+}
+
+function renderFundsView() {
+  const funds = state.funds.funds;
+  setText('fundCount', funds.length);
+
+  const holdings = computeFundHoldings();
+  const totalValue = funds.reduce((sum, f) => sum + (holdings[f.id]?.currentValue || 0), 0);
+
+  const fundsTbody = document.getElementById('fundsTbody');
+  if (funds.length === 0) {
+    fundsTbody.innerHTML = `<tr><td colspan="10">
+      <div class="empty-state">
+        <div class="es-icon">📈</div>
+        <p>No funds yet — add the opening units and average cost of what you already hold to get started.</p>
+        <button class="btn btn-sm btn-primary" onclick="openModalForOpeningPositionFund()">+ Add Opening Position</button>
+      </div>
+    </td></tr>`;
+  } else {
+    fundsTbody.innerHTML = funds.map(f => {
+      const h = holdings[f.id] || { units: 0, avgCost: 0, currentValue: 0, unrealizedPL: 0, unrealizedPLPct: 0 };
+      const weight = totalValue > 0 ? (h.currentValue / totalValue) * 100 : 0;
+      return `<tr>
+        <td style="text-align:left"><span class="sym">${escapeHtml(f.name)}</span></td>
+        <td style="text-align:left">${escapeHtml(f.amc) || '—'}</td>
+        <td style="text-align:left"><span class="sector-tag">${escapeHtml(f.category) || '—'}</span></td>
+        <td>${fNum(h.units)}</td>
+        <td>${h.units > 1e-9 ? fPKR(h.avgCost) : '—'}</td>
+        <td>${fPKR(f.currentNav)}</td>
+        <td style="text-align:left;font-family:var(--mono)">${f.navUpdatedAt}${isNavStale(f.navUpdatedAt) ? ' <span class="price-status stale">stale</span>' : ''}</td>
+        <td class="val-neu">${fPKR(h.currentValue)}</td>
+        <td class="${h.unrealizedPL >= 0 ? 'val-pos' : 'val-neg'}">${h.units > 1e-9 ? `${fPKR(h.unrealizedPL, true)} (${fPct(h.unrealizedPLPct, true)})` : '—'}</td>
+        <td>${totalValue > 0 ? fPct(weight) : '—'}</td>
+      </tr>`;
+    }).join('');
+  }
+
+  const transactions = [...state.funds.transactions].sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id);
+  setText('fundTxCount', transactions.length);
+
+  const txTbody = document.getElementById('fundTxTbody');
+  if (transactions.length === 0) {
+    txTbody.innerHTML = `<tr><td colspan="8"><div class="no-data">No fund transactions yet</div></td></tr>`;
+  } else {
+    const typeLabel = { buy: 'BUY', sell: 'SELL', dividendreinvest: 'DIV REINVEST', dividendcash: 'DIV CASH' };
+    const typeClass = { buy: 'buy', sell: 'sell', dividendreinvest: 'dividend', dividendcash: 'dividend' };
+
+    txTbody.innerHTML = transactions.map(tx => {
+      const fund = state.funds.funds.find(f => f.id === tx.fundId);
+      return `<tr>
+        <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
+        <td style="text-align:left"><span class="tx-type ${typeClass[tx.type] || ''}">${typeLabel[tx.type] || tx.type.toUpperCase()}</span></td>
+        <td style="text-align:left"><span class="sym">${escapeHtml(fund ? fund.name : '—')}</span></td>
+        <td>${tx.units ? fNum(tx.units) : '—'}</td>
+        <td>${tx.nav ? fPKR(tx.nav) : '—'}</td>
+        <td class="${tx.type === 'sell' || tx.type === 'dividendcash' ? 'val-pos' : 'val-neg'}">${tx.type === 'sell' || tx.type === 'dividendcash' ? '+' : '-'}${fPKR(tx.amount)}${tx.cgtAmount ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">CGT withheld: ${fPKR(tx.cgtAmount)}</span>` : ''}</td>
+        <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(tx.notes) || '—'}</td>
+        <td style="text-align:center;white-space:nowrap">
+          <button class="btn btn-sm" title="Edit Date / Notes" onclick="openEditFundTxModal('${tx.id}')">✎</button>
+          <button class="btn btn-sm btn-danger" onclick="deleteFundTransaction('${tx.id}')">✕</button>
+        </td>
+      </tr>`;
+    }).join('');
+  }
+
+  renderFundKpis(holdings, totalValue);
+  renderFundCharts(holdings, totalValue);
+  renderFundNavHistoryChart();
+}
+
+function renderFundKpis(holdings, totalValue) {
+  const totalInvested = Object.values(holdings).reduce((sum, h) => sum + h.totalInvested, 0);
+  const gain = totalValue - totalInvested;
+  const gainPct = totalInvested > 0 ? (gain / totalInvested) * 100 : 0;
+
+  setText('fkv-invested', totalInvested > 0 ? fPKR(totalInvested) : '—');
+  setText('fkv-value', totalValue > 0 ? fPKR(totalValue) : '—');
+
+  const gainEl = document.getElementById('fkv-gain');
+  gainEl.textContent = totalInvested > 0 ? fPKR(gain, true) : '—';
+  gainEl.className = 'kpi-val' + (totalInvested > 0 ? (gain >= 0 ? ' val-pos' : ' val-neg') : '');
+  setText('fkv-gain-pct', totalInvested > 0 ? fPct(gainPct, true) : '—');
+
+  // Latest NAV change - the most recently recorded NAV history point across all funds,
+  // compared to the point immediately before it for that same fund.
+  let latest = null;
+  for (const fid in state.funds.navHistory) {
+    const points = [...state.funds.navHistory[fid]].sort((a, b) => new Date(a.date) - new Date(b.date));
+    if (points.length === 0) continue;
+    const last = points[points.length - 1];
+    if (!latest || last.date > latest.date) {
+      const prev = points.length > 1 ? points[points.length - 2] : null;
+      latest = { fundId: fid, date: last.date, nav: last.nav, prevNav: prev ? prev.nav : null };
+    }
+  }
+
+  const navChgEl = document.getElementById('fkv-navchg');
+  if (latest && latest.prevNav != null) {
+    const chg = latest.nav - latest.prevNav;
+    const chgPct = latest.prevNav > 0 ? (chg / latest.prevNav) * 100 : 0;
+    navChgEl.textContent = fPKR(chg, true);
+    navChgEl.className = 'kpi-val ' + (chg >= 0 ? 'val-pos' : 'val-neg');
+    const fund = state.funds.funds.find(f => f.id === Number(latest.fundId));
+    setText('fkv-navchg-fund', `${fPct(chgPct, true)} — ${fund ? fund.name : ''}`);
+  } else if (latest) {
+    navChgEl.textContent = '—';
+    navChgEl.className = 'kpi-val';
+    const fund = state.funds.funds.find(f => f.id === Number(latest.fundId));
+    setText('fkv-navchg-fund', `First entry — ${fund ? fund.name : ''}`);
+  } else {
+    navChgEl.textContent = '—';
+    navChgEl.className = 'kpi-val';
+    setText('fkv-navchg-fund', '—');
+  }
+}
+
+function renderFundCharts(holdings, totalValue) {
+  const funds = state.funds.funds;
+
+  // ── Allocation by Fund ──
+  destroyChart('fundAllocChart');
+  if (funds.length && totalValue > 0) {
+    const withValue = funds.filter(f => (holdings[f.id]?.currentValue || 0) > 0);
+    chartInstances.fundAllocChart = new Chart(document.getElementById('fundAllocChart'), {
+      type: 'doughnut',
+      data: {
+        labels: withValue.map(f => f.name),
+        datasets: [{
+          data: withValue.map(f => +holdings[f.id].currentValue.toFixed(2)),
+          backgroundColor: CHART_PALETTE.slice(0, withValue.length),
+          borderColor: 'var(--card)', borderWidth: 2, hoverOffset: 6
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#64748b', font: { size: 11, family: "'Space Grotesk'" }, boxWidth: 12 } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${fPct(ctx.parsed / totalValue * 100)}` } }
+        },
+        cutout: '65%'
+      }
+    });
+  }
+
+  // ── Allocation by Category ──
+  destroyChart('fundCategoryChart');
+  if (funds.length && totalValue > 0) {
+    const catMap = {};
+    for (const f of funds) {
+      const cat = f.category || 'Uncategorized';
+      catMap[cat] = (catMap[cat] || 0) + (holdings[f.id]?.currentValue || 0);
+    }
+    // Fixed color-per-category: sorted alphabetically so a category always maps to the
+    // same palette index regardless of which other funds exist right now (color follows
+    // the entity, never its rank - a filter/holding change must not repaint survivors).
+    const catLabels = Object.keys(catMap).sort();
+    chartInstances.fundCategoryChart = new Chart(document.getElementById('fundCategoryChart'), {
+      type: 'doughnut',
+      data: {
+        labels: catLabels,
+        datasets: [{
+          data: catLabels.map(c => +catMap[c].toFixed(2)),
+          backgroundColor: CHART_PALETTE.slice(0, catLabels.length),
+          borderColor: 'var(--card)', borderWidth: 2, hoverOffset: 6
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#64748b', font: { size: 11, family: "'Space Grotesk'" }, boxWidth: 12 } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: PKR ${fPKR(ctx.raw)}` } }
+        },
+        cutout: '65%'
+      }
+    });
+  }
+
+  // ── Unrealized P&L by Fund ──
+  destroyChart('fundPlChart');
+  if (funds.length) {
+    const vals = funds.map(f => +((holdings[f.id]?.unrealizedPL) || 0).toFixed(2));
+    const colors = vals.map(v => v >= 0 ? '#0a6e42' : '#b91c1c');
+    chartInstances.fundPlChart = new Chart(document.getElementById('fundPlChart'), {
+      type: 'bar',
+      data: { labels: funds.map(f => f.name), datasets: [{ data: vals, backgroundColor: colors, borderRadius: 3, borderSkipped: false }] },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => ` PKR ${fPKR(ctx.raw, true)}` } }
+        },
+        scales: { x: axisStyle(), y: axisStyle() }
+      }
+    });
+  }
+
+  // ── Portfolio Value vs Invested ──
+  destroyChart('fundValueChart');
+  const series = computePortfolioValueSeries();
+  if (series.length) {
+    chartInstances.fundValueChart = new Chart(document.getElementById('fundValueChart'), {
+      type: 'line',
+      data: {
+        labels: series.map(s => s.date),
+        datasets: [
+          { label: 'Current Value', data: series.map(s => +s.value.toFixed(2)),
+            borderColor: '#1a56db', backgroundColor: 'rgba(26,86,219,.06)', fill: true, tension: 0.2, pointRadius: 0, borderWidth: 2 },
+          { label: 'Invested', data: series.map(s => +s.invested.toFixed(2)),
+            borderColor: '#8898b0', backgroundColor: 'transparent', borderDash: [4, 3], fill: false, tension: 0.2, pointRadius: 0, borderWidth: 2 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { labels: { color: '#8b949e', font: { size: 11, family: "'Space Grotesk'" } } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: PKR ${fPKR(ctx.raw)}` } }
+        },
+        scales: {
+          x: axisStyle({ ticks: { color: '#64748b', font: CHART_DEFAULTS.mono, maxTicksLimit: 8 } }),
+          y: axisStyle()
+        }
+      }
+    });
+  }
+}
+
+let fundNavChartFundId = null;
+
+// NAV history for one selected fund, with buy/sell markers overlaid at their actual
+// transaction dates. No annotation plugin is loaded (this app deliberately stays on the
+// single Chart.js CDN script - see the plan), so markers are a second/third dataset on
+// the same category axis, null everywhere except at a transaction's date - a standard
+// vanilla-Chart.js technique, not a new dependency.
+function renderFundNavHistoryChart() {
+  const funds = state.funds.funds;
+  const picker = document.getElementById('fundNavChartPicker');
+
+  if (funds.length === 0) {
+    picker.innerHTML = '';
+    destroyChart('fundNavHistoryChart');
+    return;
+  }
+
+  if (fundNavChartFundId == null || !funds.some(f => f.id === fundNavChartFundId)) {
+    fundNavChartFundId = funds[0].id;
+  }
+  picker.innerHTML = funds.map(f => `<option value="${f.id}" ${f.id === fundNavChartFundId ? 'selected' : ''}>${escapeHtml(f.name)}</option>`).join('');
+  fundNavChartFundId = parseInt(picker.value, 10);
+
+  destroyChart('fundNavHistoryChart');
+  const history = [...(state.funds.navHistory[fundNavChartFundId] || [])].sort((a, b) => new Date(a.date) - new Date(b.date));
+  if (history.length === 0) return;
+
+  const txs = state.funds.transactions.filter(t => t.fundId === fundNavChartFundId && (t.type === 'buy' || t.type === 'sell'));
+  const allDates = [...new Set([...history.map(h => h.date), ...txs.map(t => t.date)])].sort();
+  const navByDate = Object.fromEntries(history.map(h => [h.date, h.nav]));
+
+  // Forward-fill NAV for a transaction date that has no NAV entry of its own, so the
+  // line doesn't gap - an approximation of "the NAV as of that date" from the last known
+  // point, same technique as navAsOfDate() above.
+  let lastNav = null;
+  const navSeries = allDates.map(d => { if (navByDate[d] != null) lastNav = navByDate[d]; return lastNav; });
+  const buyMarkers = allDates.map(d => (txs.find(t => t.date === d && t.type === 'buy') || {}).nav ?? null);
+  const sellMarkers = allDates.map(d => (txs.find(t => t.date === d && t.type === 'sell') || {}).nav ?? null);
+
+  chartInstances.fundNavHistoryChart = new Chart(document.getElementById('fundNavHistoryChart'), {
+    type: 'line',
+    data: {
+      labels: allDates,
+      datasets: [
+        { label: 'NAV', data: navSeries, borderColor: '#1a56db', backgroundColor: 'rgba(26,86,219,.06)',
+          fill: true, tension: 0.2, pointRadius: 0, borderWidth: 2, spanGaps: true },
+        { label: 'Buy', data: buyMarkers, showLine: false, pointStyle: 'triangle',
+          pointRadius: buyMarkers.map(v => v != null ? 6 : 0), pointBackgroundColor: '#0a6e42', pointBorderColor: '#0a6e42' },
+        { label: 'Sell', data: sellMarkers, showLine: false, pointStyle: 'triangle', rotation: 180,
+          pointRadius: sellMarkers.map(v => v != null ? 6 : 0), pointBackgroundColor: '#b91c1c', pointBorderColor: '#b91c1c' }
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: {
+        legend: { labels: { color: '#8b949e', font: { size: 11, family: "'Space Grotesk'" } } },
+        tooltip: { callbacks: { label: ctx => ` ${ctx.dataset.label}: PKR ${fPKR(ctx.raw)}` } }
+      },
+      scales: {
+        x: axisStyle({ ticks: { color: '#64748b', font: CHART_DEFAULTS.mono, maxTicksLimit: 8 } }),
+        y: axisStyle()
+      }
+    }
+  });
+}
+
+/* ══════════════════════════════════════════════════════
+   OVERVIEW — combines the two otherwise-separate stocks/funds worlds for display only;
+   nothing here writes back into state.transactions or state.funds.
+══════════════════════════════════════════════════════ */
+
+// Stock portfolio value (not P&L) at each historical transaction date - same snapshot
+// walk and same today-uses-live-price/past-uses-historical-close rule as the existing
+// Cumulative P&L chart (see renderCharts's cumulChart), just valuing holdings instead of
+// netting them against cost basis.
+function computeStocksValueSeries() {
+  const snapshots = computeCumulativePLSnapshots();
+  const todayStr = new Date().toISOString().split('T')[0];
+  return snapshots.map(s => {
+    const isToday = s.date === todayStr;
+    let value = 0, invested = 0;
+    for (const sym in s.holdings) {
+      const h = s.holdings[sym];
+      const price = (isToday ? state.prices[sym]?.price : null) ?? historicalPriceFor(sym, s.date);
+      if (price != null) value += price * h.shares;
+      invested += h.totalCost;
+    }
+    return { date: s.date, value, invested };
+  });
+}
+
+// Merges the stocks value series and the funds value series (computePortfolioValueSeries)
+// onto one combined date axis, forward-filling whichever side has no snapshot on a given
+// date - the two series update at different, unrelated cadences (a stock trade vs. a NAV
+// entry), so a plain zip-by-index would misalign them.
+function computeCombinedValueSeries() {
+  const stocksSeries = computeStocksValueSeries();
+  const fundsSeries = computePortfolioValueSeries();
+  const stocksByDate = Object.fromEntries(stocksSeries.map(s => [s.date, s.value]));
+  const fundsByDate = Object.fromEntries(fundsSeries.map(s => [s.date, s.value]));
+  const allDates = [...new Set([...stocksSeries.map(s => s.date), ...fundsSeries.map(s => s.date)])].sort();
+
+  let lastStocks = 0, lastFunds = 0;
+  return allDates.map(d => {
+    if (stocksByDate[d] != null) lastStocks = stocksByDate[d];
+    if (fundsByDate[d] != null) lastFunds = fundsByDate[d];
+    return { date: d, total: lastStocks + lastFunds };
+  });
+}
+
+function renderOverviewView() {
+  const { holdings: stockHoldings, totalMktValue: stocksValue, totalCostBasis: stocksInvested } = getEnrichedHoldings();
+  const stocksGain = stockHoldings.reduce((a, h) => a + (h.unrealizedPL || 0), 0);
+
+  const fundHoldings = computeFundHoldings();
+  const fundsValue = Object.values(fundHoldings).reduce((a, h) => a + h.currentValue, 0);
+  const fundsInvested = Object.values(fundHoldings).reduce((a, h) => a + h.totalInvested, 0);
+  const fundsGain = fundsValue - fundsInvested;
+
+  const netWorth = stocksValue + fundsValue + state.cash.balance;
+  const totalInvested = stocksInvested + fundsInvested;
+  const totalGain = stocksGain + fundsGain;
+  const totalGainPct = totalInvested > 0 ? (totalGain / totalInvested) * 100 : 0;
+
+  setText('ov-networth', netWorth > 0 ? fPKR(netWorth) : '—');
+  setText('ov-stocks', stocksValue > 0 ? fPKR(stocksValue) : '—');
+  setText('ov-funds', fundsValue > 0 ? fPKR(fundsValue) : '—');
+
+  const gainEl = document.getElementById('ov-gain');
+  gainEl.textContent = totalInvested > 0 ? fPKR(totalGain, true) : '—';
+  gainEl.className = 'kpi-val' + (totalInvested > 0 ? (totalGain >= 0 ? ' val-pos' : ' val-neg') : '');
+  setText('ov-gain-pct', totalInvested > 0 ? fPct(totalGainPct, true) : '—');
+
+  renderOverviewCharts(stocksValue, fundsValue);
+}
+
+function renderOverviewCharts(stocksValue, fundsValue) {
+  // ── Stocks vs Mutual Funds ──
+  destroyChart('ovAllocChart');
+  if (stocksValue > 0 || fundsValue > 0) {
+    chartInstances.ovAllocChart = new Chart(document.getElementById('ovAllocChart'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Stocks', 'Mutual Funds'],
+        // Fixed 2-slot mapping (Stocks = the app's own accent blue, Funds = the next
+        // categorical hue) rather than CHART_PALETTE.slice(0, n) - with only ever two
+        // possible categories here, the assignment is fixed by identity, not by count.
+        datasets: [{
+          data: [+stocksValue.toFixed(2), +fundsValue.toFixed(2)],
+          backgroundColor: [CHART_PALETTE[0], CHART_PALETTE[4]],
+          borderColor: 'var(--card)', borderWidth: 2, hoverOffset: 6
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { position: 'right', labels: { color: '#64748b', font: { size: 11, family: "'Space Grotesk'" }, boxWidth: 12 } },
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: PKR ${fPKR(ctx.raw)} (${fPct(ctx.parsed / (stocksValue + fundsValue) * 100)})` } }
+        },
+        cutout: '65%'
+      }
+    });
+  }
+
+  // ── Combined Portfolio Value Over Time ──
+  destroyChart('ovValueChart');
+  const series = computeCombinedValueSeries();
+  if (series.length) {
+    chartInstances.ovValueChart = new Chart(document.getElementById('ovValueChart'), {
+      type: 'line',
+      data: {
+        labels: series.map(s => s.date),
+        datasets: [{
+          data: series.map(s => +s.total.toFixed(2)),
+          borderColor: '#1a56db', backgroundColor: 'rgba(26,86,219,.06)',
+          fill: true, tension: 0.2, pointRadius: 0, borderWidth: 2
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: {
+          legend: { display: false },
+          tooltip: { callbacks: { label: ctx => ` PKR ${fPKR(ctx.raw)}` } }
+        },
+        scales: {
+          x: axisStyle({ ticks: { color: '#64748b', font: CHART_DEFAULTS.mono, maxTicksLimit: 8 } }),
+          y: axisStyle()
+        }
+      }
+    });
+  }
+}
+
+let fundModalType = 'buy';
+let fundModalDivType = 'reinvest';
+let fundOpeningMode = false;
+
+function clearFundErrors() {
+  ['errFundPicker', 'errFundName', 'errFundUnits', 'errFundNav', 'errFundDate'].forEach(id => setText(id, ''));
+}
+
+function openModalForOpeningPositionFund() {
+  openFundModal('buy', true);
+  document.getElementById('fFundNotes').value = 'Opening position';
+}
+
+function openFundModal(type, opening = false) {
+  fundOpeningMode = opening;
+  document.getElementById('fFundPicker').innerHTML =
+    '<option value="">Select a fund</option>' +
+    state.funds.funds.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join('') +
+    '<option value="__new__">+ Add New Fund…</option>';
+  document.getElementById('fFundPicker').value = '';
+  document.getElementById('newFundFields').style.display = 'none';
+  document.getElementById('fFundAmcPicker').innerHTML =
+    '<option value="">Select AMC</option>' +
+    Object.keys(AMC_FUNDS).map(amc => `<option value="${escapeHtml(amc)}">${escapeHtml(amc)}</option>`).join('') +
+    '<option value="__other__">Other (type manually)</option>';
+  document.getElementById('fFundAmcPicker').value = '';
+  document.getElementById('fFundAmc').style.display = 'none';
+  document.getElementById('fFundNamePicker').innerHTML = '<option value="">Select AMC first</option>';
+  document.getElementById('fFundName').style.display = 'none';
+  document.getElementById('fFundName').value = '';
+  document.getElementById('fFundAmc').value = '';
+  document.getElementById('fFundCategory').value = '';
+  document.getElementById('fFundUnits').value = '';
+  document.getElementById('fFundUnits').disabled = false;
+  document.getElementById('fFundNav').value = '';
+  document.getElementById('fFundLoadPct').value = '0';
+  document.getElementById('fFundAmount').value = '';
+  document.getElementById('fFundCgtAmount').value = '0';
+  document.getElementById('fFundNotes').value = '';
+  document.getElementById('fFundSellAll').checked = false;
+  document.getElementById('fFundDate').value = new Date().toISOString().split('T')[0];
+  clearFundErrors();
+  setFundTxType(type || 'buy');
+  setFundOpeningModeUI(fundOpeningMode);
+  document.getElementById('fundModalBackdrop').classList.add('open');
+}
+
+function closeFundModal() {
+  document.getElementById('fundModalBackdrop').classList.remove('open');
+}
+
+// Mirrors the stock modal's opening-position mode (setOpeningModeUI): an opening
+// position is just a Buy with no load%, so it hides the Buy/Sell/Dividend toggle
+// (type is locked to 'buy') and the load% field, and relabels the NAV field since
+// it's an average cost basis being backfilled, not today's transacted NAV.
+function setFundOpeningModeUI(isOpening) {
+  document.getElementById('fundTypeGroup').style.display = isOpening ? 'none' : '';
+  const navLabel = document.querySelector('#fundNavGroup .form-label');
+  if (navLabel) navLabel.textContent = isOpening ? 'Avg Cost NAV (PKR)' : 'NAV Per Unit (PKR)';
+  if (isOpening) {
+    document.getElementById('fundLoadGroup').style.display = 'none';
+    document.getElementById('fundModalTitle').textContent = 'Add Opening Position';
+    document.getElementById('submitFundTxBtn').textContent = 'Save Opening Position';
+  }
+}
+
+function setFundTxType(type) {
+  fundModalType = type;
+  document.getElementById('fFundTxType').value = type;
+
+  document.getElementById('fundTypeBuyBtn').classList.toggle('active-buy', type === 'buy');
+  document.getElementById('fundTypeSellBtn').classList.toggle('active-sell', type === 'sell');
+  document.getElementById('fundTypeDivBtn').classList.toggle('active-div', type === 'dividend');
+
+  document.getElementById('fundModalTitle').textContent =
+    type === 'buy' ? 'Buy Fund Units' : type === 'sell' ? 'Sell Fund Units' : 'Record Dividend';
+  document.getElementById('submitFundTxBtn').textContent =
+    type === 'buy' ? 'Add Buy' : type === 'sell' ? 'Add Sell' : 'Add Dividend';
+
+  document.getElementById('fundLoadLabel').textContent = type === 'sell' ? 'Back Load %' : 'Front Load %';
+  document.getElementById('fundLoadGroup').style.display = type === 'dividend' ? 'none' : '';
+  document.getElementById('fundSellHint').style.display = type === 'sell' ? '' : 'none';
+  document.getElementById('fundDivTypeGroup').style.display = type === 'dividend' ? '' : 'none';
+
+  // "Add New Fund" only makes sense on a Buy - Sell/Dividend need an existing, already-
+  // held fund, so hide the option and back out of it if it was mid-selection.
+  const newFundOption = document.querySelector('#fFundPicker option[value="__new__"]');
+  if (newFundOption) newFundOption.style.display = type === 'buy' ? '' : 'none';
+  if (type !== 'buy' && document.getElementById('fFundPicker').value === '__new__') {
+    document.getElementById('fFundPicker').value = '';
+    document.getElementById('newFundFields').style.display = 'none';
+  }
+
+  if (type === 'dividend') setFundDivType(fundModalDivType);
+  else {
+    document.getElementById('fundUnitsGroup').style.display = '';
+    document.getElementById('fundNavGroup').style.display = '';
+    document.getElementById('fundAmountGroup').style.display = '';
+  }
+  updateFundSellHint();
+  updateFundAmountPreview();
+  updateFundCgtPreview();
+}
+
+function setFundDivType(divType) {
+  fundModalDivType = divType;
+  document.getElementById('fFundDivType').value = divType;
+  document.getElementById('fundDivReinvestBtn').classList.toggle('active-buy', divType === 'reinvest');
+  document.getElementById('fundDivCashBtn').classList.toggle('active-buy', divType === 'cash');
+  document.getElementById('fundUnitsGroup').style.display = divType === 'reinvest' ? '' : 'none';
+  document.getElementById('fundNavGroup').style.display = divType === 'reinvest' ? '' : 'none';
+  updateFundAmountPreview();
+}
+
+function onFundPickerChange() {
+  const val = document.getElementById('fFundPicker').value;
+  document.getElementById('newFundFields').style.display = val === '__new__' ? '' : 'none';
+  updateFundSellHint();
+  updateFundCgtPreview();
+}
+
+// AMC -> Fund cascade for the "Add New Fund" block - picking a known AMC (from
+// AMC_FUNDS) narrows the Fund dropdown to that AMC's own flagship funds; either level
+// can fall back to "Other (type manually)" for an AMC/fund not in the curated list.
+function onFundAmcPickerChange() {
+  const amc = document.getElementById('fFundAmcPicker').value;
+  const amcOther = document.getElementById('fFundAmc');
+  const namePicker = document.getElementById('fFundNamePicker');
+  const nameOther = document.getElementById('fFundName');
+
+  amcOther.style.display = amc === '__other__' ? '' : 'none';
+  if (amc !== '__other__') amcOther.value = '';
+
+  if (amc === '__other__') {
+    // No curated fund list for a manually-typed AMC - skip straight to free text
+    // instead of leaving the Fund picker stuck on a dead "Select AMC first" option.
+    namePicker.style.display = 'none';
+    namePicker.innerHTML = '<option value="__other__">Other (type manually)</option>';
+    namePicker.value = '__other__';
+    nameOther.style.display = '';
+  } else if (amc) {
+    const funds = AMC_FUNDS[amc] || [];
+    namePicker.style.display = '';
+    namePicker.innerHTML = '<option value="">Select fund</option>' +
+      funds.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('') +
+      '<option value="__other__">Other (type manually)</option>';
+    namePicker.value = '';
+    nameOther.style.display = 'none';
+  } else {
+    namePicker.style.display = '';
+    namePicker.innerHTML = '<option value="">Select AMC first</option>';
+    namePicker.value = '';
+    nameOther.style.display = 'none';
+  }
+  nameOther.value = '';
+  document.getElementById('fFundCategory').value = '';
+}
+
+// Auto-fills Category from FUND_CATEGORY once a known fund is picked - the user can
+// still edit or clear it by hand afterward (it's a plain text input, not locked), and
+// picking "Other" leaves it untouched for manual entry since there's nothing to look up.
+function onFundNamePickerChange() {
+  const val = document.getElementById('fFundNamePicker').value;
+  const isOther = val === '__other__';
+  document.getElementById('fFundName').style.display = isOther ? '' : 'none';
+  if (isOther) {
+    document.getElementById('fFundName').value = '';
+  } else {
+    document.getElementById('fFundCategory').value = val ? (FUND_CATEGORY[val] || '') : '';
+  }
+}
+
+function updateFundSellHint() {
+  if (fundModalType !== 'sell') return;
+  const fundId = parseInt(document.getElementById('fFundPicker').value, 10);
+  const held = fundId ? fundUnitsHeld(fundId) : 0;
+  document.getElementById('fundUnitsHeldDisplay').textContent = fNum(held);
+  if (document.getElementById('fFundSellAll').checked) {
+    document.getElementById('fFundUnits').value = held || '';
+    updateFundAmountPreview();
+  }
+}
+
+function onFundSellAllToggle() {
+  document.getElementById('fFundUnits').disabled = document.getElementById('fFundSellAll').checked;
+  updateFundSellHint();
+  updateFundCgtPreview();
+}
+
+// Suggests CGT for a fund Sell using the CURRENT (pre-this-sale) avg cost for the fund
+// (from computeFundHoldings, the same figure the Mutual Funds table shows as Avg Cost)
+// and the default CGT rate from Settings - same "editable starting value, verify
+// against your own redemption statement" contract as the stock sell's CGT suggestion
+// (see updateCgtPreview). The AMC withholds this before crediting proceeds, same as
+// NCCPL does on a stock sell - it isn't optional the way a stock's CGT can occasionally
+// be zero-rated, but the suggestion is still just a starting point either way.
+function updateFundCgtPreview() {
+  const group = document.getElementById('fundCgtGroup');
+  const hint = document.getElementById('fundCgtHint');
+  if (!group) return;
+
+  if (fundModalType !== 'sell') {
+    group.style.display = 'none';
+    return;
+  }
+  group.style.display = '';
+
+  const fundId = parseInt(document.getElementById('fFundPicker').value, 10);
+  const units = parseFloat(document.getElementById('fFundUnits').value);
+  const nav = parseFloat(document.getElementById('fFundNav').value);
+  const holding = fundId ? computeFundHoldings()[fundId] : null;
+
+  if (!holding || !units || !nav) {
+    hint.textContent = 'Select a fund and enter units and NAV for a CGT suggestion';
+    return;
+  }
+
+  const gain = units * (nav - holding.avgCost);
+  const suggested = Math.max(0, gain) * (state.settings.cgtRatePct / 100);
+  document.getElementById('fFundCgtAmount').value = suggested.toFixed(2);
+  hint.textContent = gain > 0
+    ? `Gain: PKR ${fPKR(gain)} × ${state.settings.cgtRatePct}% — verify against your redemption statement`
+    : `No gain vs avg cost PKR ${fPKR(holding.avgCost)} — CGT normally 0`;
+}
+
+// Two-of-three convenience calc: editing Units/NAV/Load% drives Amount forward. The
+// server always recomputes Amount authoritatively from Units/Nav/load% regardless (see
+// POST /api/funds/transactions/buy|sell) - this is purely a data-entry convenience, not
+// a value either side trusts the other for.
+function updateFundAmountPreview() {
+  if (fundModalType === 'dividend' && fundModalDivType === 'cash') return;
+  const units = parseFloat(document.getElementById('fFundUnits').value);
+  const nav = parseFloat(document.getElementById('fFundNav').value);
+  const loadPct = parseFloat(document.getElementById('fFundLoadPct').value) || 0;
+  if (units > 0 && nav > 0) {
+    const factor = fundModalType === 'sell' ? (1 - loadPct / 100) : (1 + loadPct / 100);
+    document.getElementById('fFundAmount').value = (units * nav * factor).toFixed(2);
+  }
+}
+
+// Editing Amount directly solves back for Units, given a known NAV - lets a user who
+// knows "I'm putting in PKR 50,000" drive the form instead of computing units by hand.
+function onFundAmountEdited() {
+  if (fundModalType === 'dividend' && fundModalDivType === 'cash') return;
+  const amount = parseFloat(document.getElementById('fFundAmount').value);
+  const nav = parseFloat(document.getElementById('fFundNav').value);
+  const loadPct = parseFloat(document.getElementById('fFundLoadPct').value) || 0;
+  if (amount > 0 && nav > 0) {
+    const factor = fundModalType === 'sell' ? (1 - loadPct / 100) : (1 + loadPct / 100);
+    document.getElementById('fFundUnits').value = (amount / (nav * factor)).toFixed(4);
+  }
+}
+
+async function submitFundTransaction() {
+  clearFundErrors();
+  let valid = true;
+
+  const pickerVal = document.getElementById('fFundPicker').value;
+  const isNewFund = pickerVal === '__new__';
+  const date = document.getElementById('fFundDate').value;
+  const notes = document.getElementById('fFundNotes').value;
+
+  if (!pickerVal) { setText('errFundPicker', 'Select a fund'); valid = false; }
+
+  const amcPickerVal = document.getElementById('fFundAmcPicker').value;
+  const namePickerVal = document.getElementById('fFundNamePicker').value;
+  const newFundAmc = amcPickerVal === '__other__' ? document.getElementById('fFundAmc').value.trim() : amcPickerVal;
+  const newFundName = namePickerVal === '__other__' ? document.getElementById('fFundName').value.trim() : namePickerVal;
+  if (isNewFund) {
+    if (!amcPickerVal) { setText('errFundPicker', 'Select an AMC'); valid = false; }
+    else if (!newFundAmc) { setText('errFundPicker', 'AMC name required'); valid = false; }
+    if (!newFundName) { setText('errFundName', 'Select or enter a fund name'); valid = false; }
+  }
+  if (!date) { setText('errFundDate', 'Date required'); valid = false; }
+
+  const units = parseFloat(document.getElementById('fFundUnits').value);
+  const nav = parseFloat(document.getElementById('fFundNav').value);
+  const loadPct = parseFloat(document.getElementById('fFundLoadPct').value) || 0;
+  const amount = parseFloat(document.getElementById('fFundAmount').value);
+
+  const needsUnitsNav = fundModalType !== 'dividend' || fundModalDivType === 'reinvest';
+  if (needsUnitsNav) {
+    if (!units || units <= 0) { setText('errFundUnits', 'Must be a positive number'); valid = false; }
+    if (!nav || nav <= 0) { setText('errFundNav', 'Must be a positive number'); valid = false; }
+  } else if (!amount || amount <= 0) {
+    setText('errFundUnits', 'Amount must be a positive number');
+    valid = false;
+  }
+
+  if (fundModalType === 'sell' && !isNewFund && pickerVal) {
+    const held = fundUnitsHeld(parseInt(pickerVal, 10));
+    if (units > held + 1e-9) {
+      toast(`Cannot sell ${fNum(units)} units — only ${fNum(held)} available`, 'error');
+      valid = false;
+    }
+  }
+
+  if (!valid) return;
+
+  try {
+    let fundId = isNewFund ? null : parseInt(pickerVal, 10);
+    if (isNewFund) {
+      const res = await fetch('/api/funds/funds', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newFundName,
+          amc: newFundAmc,
+          category: document.getElementById('fFundCategory').value.trim(),
+          currentNav: nav,
+          navDate: date
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.error || 'Could not create fund', 'error');
+        return;
+      }
+      const fund = await res.json();
+      fund.currentNav = parseFloat(fund.currentNav);
+      state.funds.funds.push(fund);
+      fundId = fund.id;
+    }
+
+    let endpoint, payload;
+    if (fundModalType === 'buy') {
+      endpoint = '/api/funds/transactions/buy';
+      payload = { fundId, date, units, nav, frontLoadPct: loadPct, notes };
+    } else if (fundModalType === 'sell') {
+      endpoint = '/api/funds/transactions/sell';
+      const cgtAmount = parseFloat(document.getElementById('fFundCgtAmount').value) || 0;
+      payload = { fundId, date, units, nav, backLoadPct: loadPct, notes, cgtAmount };
+    } else {
+      endpoint = '/api/funds/transactions/dividend';
+      payload = fundModalDivType === 'reinvest'
+        ? { fundId, date, type: 'reinvest', units, nav, notes }
+        : { fundId, date, type: 'cash', amount, notes };
+    }
+
+    const res = await fetch(endpoint, {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not add transaction', 'error');
+      return;
+    }
+    const tx = await res.json();
+    tx.units = parseFloat(tx.units);
+    tx.nav = parseFloat(tx.nav);
+    tx.amount = parseFloat(tx.amount);
+    tx.frontLoadPct = parseFloat(tx.frontLoadPct) || 0;
+    tx.backLoadPct = parseFloat(tx.backLoadPct) || 0;
+    tx.cgtAmount = tx.cgtAmount != null ? parseFloat(tx.cgtAmount) : null;
+    state.funds.transactions.push(tx);
+
+    toast(`${fundModalType.toUpperCase()} added${isNewFund ? ' — fund created' : ''}`, 'success');
+    closeFundModal();
+    renderFundsView();
+    renderOverviewView();
+  } catch (e) {
+    toast('Network error — could not add fund transaction', 'error');
+  }
+}
+
+async function deleteFundTransaction(id) {
+  id = Number(id);
+  const tx = state.funds.transactions.find(t => t.id === id);
+  if (!tx) return;
+  const fund = state.funds.funds.find(f => f.id === tx.fundId);
+  const label = `${tx.type.toUpperCase()} ${tx.units ? fNum(tx.units) + ' units of ' : ''}${fund ? fund.name : 'this fund'}`;
+  if (!confirm(`Delete this ${label}? This cannot be undone.`)) return;
+
+  try {
+    const res = await fetch(`/api/funds/transactions/${id}`, { method: 'DELETE', credentials: 'include' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Cannot delete — would cause negative units held on a later sell', 'error');
+      return;
+    }
+    state.funds.transactions = state.funds.transactions.filter(t => t.id !== id);
+    renderFundsView();
+    renderOverviewView();
+    toast('Fund transaction removed', 'info');
+  } catch (e) {
+    toast('Network error — could not delete fund transaction', 'error');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
+   FUND PDF IMPORT — parses a UBL/Al-Ameen portfolio statement (POST
+   /api/funds/import/pdf) into candidate opening positions, then walks the user
+   through them one at a time. Mirrors the ledger's pdfImport* wizard (see
+   handlePdfFileSelected et al.) - a separate copy rather than a shared one because
+   the two review different fields (fund+units+NAV vs symbol+shares+price+commission)
+   and each confirmed row here is submitted as an opening position (0% load, no cash
+   entry - see setFundOpeningModeUI), not a regular transaction.
+══════════════════════════════════════════════════════ */
+let fundPdfImportCandidates = [];
+let fundPdfImportIndex = 0;
+let fundPdfImportConfirmedCount = 0;
+let fundPdfImportSkippedCount = 0;
+let fundPdfImportActedOn = new Set();
+
+async function handleFundPdfFileSelected(event) {
+  const file = event.target.files[0];
+  event.target.value = '';
+  if (!file) return;
+
+  const formData = new FormData();
+  formData.append('file', file);
+
+  toast('Reading PDF…', 'info');
+  try {
+    const res = await fetch('/api/funds/import/pdf', {
+      method: 'POST',
+      credentials: 'include',
+      body: formData
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(body.error || 'Could not read this PDF', 'error');
+      return;
+    }
+    for (const w of (body.warnings || [])) toast(w, 'warning');
+
+    if (!body.candidates || body.candidates.length === 0) {
+      if (!body.warnings || body.warnings.length === 0) {
+        toast('No fund holdings found in this PDF', 'warning');
+      }
+      return;
+    }
+
+    fundPdfImportCandidates = body.candidates.map(c => ({
+      ...c,
+      units: parseFloat(c.units),
+      unitPrice: parseFloat(c.unitPrice),
+      investmentValue: parseFloat(c.investmentValue),
+      marketPrice: c.marketPrice != null ? parseFloat(c.marketPrice) : null,
+    }));
+    fundPdfImportIndex = 0;
+    fundPdfImportConfirmedCount = 0;
+    fundPdfImportSkippedCount = 0;
+    fundPdfImportActedOn = new Set();
+    openFundPdfImportModal();
+  } catch (e) {
+    toast('Network error — could not upload PDF', 'error');
+  }
+}
+
+// Strips the trailing "(ABBR)" scheme code and normalizes case/whitespace so a parsed
+// name can be compared against both the user's own funds (state.funds.funds) and the
+// curated AMC_FUNDS list, which are titlecased rather than the statement's ALL CAPS.
+function normalizeFundName(name) {
+  return name.replace(/\([A-Z0-9]+\)\s*$/, '').trim().toLowerCase().replace(/\s+/g, ' ');
+}
+
+function matchFundCandidate(candidate) {
+  const norm = normalizeFundName(candidate.schemeNameRaw);
+  const existing = state.funds.funds.find(f => normalizeFundName(f.name) === norm);
+  if (existing) return { existingFundId: existing.id };
+
+  for (const [amc, fundNames] of Object.entries(AMC_FUNDS)) {
+    const match = fundNames.find(f => normalizeFundName(f) === norm);
+    if (match) return { amc, fundName: match, category: FUND_CATEGORY[match] || '' };
+  }
+  return {};
+}
+
+function openFundPdfImportModal() {
+  document.getElementById('fundPdfImportBackdrop').classList.add('open');
+  renderFundPdfImportStep();
+}
+
+function closeFundPdfImport() {
+  document.getElementById('fundPdfImportBackdrop').classList.remove('open');
+}
+
+function clearPfErrors() {
+  ['errPfFundPicker', 'errPfFundName', 'errPfUnits', 'errPfNav', 'errPfDate'].forEach(id => setText(id, ''));
+}
+
+function renderFundPdfImportStep() {
+  clearPfErrors();
+  const total = fundPdfImportCandidates.length;
+  const c = fundPdfImportCandidates[fundPdfImportIndex];
+  const match = matchFundCandidate(c);
+
+  document.getElementById('pfProgress').textContent =
+    `Holding ${fundPdfImportIndex + 1} of ${total} · Confirmed: ${fundPdfImportConfirmedCount} · Skipped: ${fundPdfImportSkippedCount} · Remaining: ${total - fundPdfImportConfirmedCount - fundPdfImportSkippedCount}`;
+  const marketPriceNote = c.marketPrice != null
+    ? ` · Market price ${fNum(c.marketPrice)} will also be set as the fund's current NAV, so unrealized gain/loss is correct right away.`
+    : '';
+  document.getElementById('pfSourceRow').textContent = (match.existingFundId || match.amc
+    ? `From statement: "${c.schemeNameRaw}"${c.unitType ? ` (${c.unitType})` : ''}`
+    : `⚠ From statement: "${c.schemeNameRaw}"${c.unitType ? ` (${c.unitType})` : ''} — couldn't match to a known fund, please pick or add one below.`) + marketPriceNote;
+
+  document.getElementById('pfFundPicker').innerHTML =
+    '<option value="">Select a fund</option>' +
+    state.funds.funds.map(f => `<option value="${f.id}">${escapeHtml(f.name)}</option>`).join('') +
+    '<option value="__new__">+ Add New Fund…</option>';
+
+  document.getElementById('pfFundAmcPicker').innerHTML =
+    '<option value="">Select AMC</option>' +
+    Object.keys(AMC_FUNDS).map(amc => `<option value="${escapeHtml(amc)}">${escapeHtml(amc)}</option>`).join('') +
+    '<option value="__other__">Other (type manually)</option>';
+  document.getElementById('pfFundAmc').style.display = 'none';
+  document.getElementById('pfFundAmc').value = '';
+  document.getElementById('pfFundNamePicker').innerHTML = '<option value="">Select AMC first</option>';
+  document.getElementById('pfFundName').style.display = 'none';
+  document.getElementById('pfFundName').value = '';
+  document.getElementById('pfFundCategory').value = '';
+
+  if (match.existingFundId) {
+    document.getElementById('pfFundPicker').value = String(match.existingFundId);
+    document.getElementById('pfNewFundFields').style.display = 'none';
+  } else {
+    document.getElementById('pfFundPicker').value = '__new__';
+    document.getElementById('pfNewFundFields').style.display = '';
+    if (match.amc) {
+      document.getElementById('pfFundAmcPicker').value = match.amc;
+      onPfFundAmcPickerChange();
+      document.getElementById('pfFundNamePicker').value = match.fundName;
+      onPfFundNamePickerChange();
+    }
+  }
+
+  document.getElementById('pfUnits').value = c.units;
+  document.getElementById('pfNav').value = c.unitPrice;
+  document.getElementById('pfDate').value = c.asOfDate || new Date().toISOString().split('T')[0];
+  document.getElementById('pfNotes').value = 'Opening position — imported from portfolio statement';
+
+  document.getElementById('pfPrevBtn').disabled = fundPdfImportIndex === 0;
+}
+
+function onPfFundPickerChange() {
+  const val = document.getElementById('pfFundPicker').value;
+  document.getElementById('pfNewFundFields').style.display = val === '__new__' ? '' : 'none';
+}
+
+function onPfFundAmcPickerChange() {
+  const amc = document.getElementById('pfFundAmcPicker').value;
+  const amcOther = document.getElementById('pfFundAmc');
+  const namePicker = document.getElementById('pfFundNamePicker');
+  const nameOther = document.getElementById('pfFundName');
+
+  amcOther.style.display = amc === '__other__' ? '' : 'none';
+  if (amc !== '__other__') amcOther.value = '';
+
+  if (amc === '__other__') {
+    namePicker.style.display = 'none';
+    namePicker.innerHTML = '<option value="__other__">Other (type manually)</option>';
+    namePicker.value = '__other__';
+    nameOther.style.display = '';
+  } else if (amc) {
+    const fundNames = AMC_FUNDS[amc] || [];
+    namePicker.style.display = '';
+    namePicker.innerHTML = '<option value="">Select fund</option>' +
+      fundNames.map(f => `<option value="${escapeHtml(f)}">${escapeHtml(f)}</option>`).join('') +
+      '<option value="__other__">Other (type manually)</option>';
+    namePicker.value = '';
+    nameOther.style.display = 'none';
+  } else {
+    namePicker.style.display = '';
+    namePicker.innerHTML = '<option value="">Select AMC first</option>';
+    namePicker.value = '';
+    nameOther.style.display = 'none';
+  }
+  nameOther.value = '';
+  document.getElementById('pfFundCategory').value = '';
+}
+
+function onPfFundNamePickerChange() {
+  const val = document.getElementById('pfFundNamePicker').value;
+  const isOther = val === '__other__';
+  document.getElementById('pfFundName').style.display = isOther ? '' : 'none';
+  if (isOther) {
+    document.getElementById('pfFundName').value = '';
+  } else {
+    document.getElementById('pfFundCategory').value = val ? (FUND_CATEGORY[val] || '') : '';
+  }
+}
+
+function fundPdfImportPrevious() {
+  if (fundPdfImportIndex === 0) return;
+  fundPdfImportIndex--;
+  renderFundPdfImportStep();
+}
+
+function fundPdfImportAdvanceOrFinish() {
+  const nextIndex = fundPdfImportCandidates.findIndex((_, i) => i > fundPdfImportIndex && !fundPdfImportActedOn.has(i));
+  if (nextIndex !== -1) {
+    fundPdfImportIndex = nextIndex;
+    renderFundPdfImportStep();
+    return;
+  }
+  if (fundPdfImportActedOn.size >= fundPdfImportCandidates.length) {
+    closeFundPdfImport();
+    toast(`Imported ${fundPdfImportConfirmedCount} of ${fundPdfImportCandidates.length} fund holdings from PDF`, 'success');
+    return;
+  }
+  const earlier = fundPdfImportCandidates.findIndex((_, i) => !fundPdfImportActedOn.has(i));
+  fundPdfImportIndex = earlier;
+  renderFundPdfImportStep();
+}
+
+function fundPdfImportSkip() {
+  fundPdfImportActedOn.add(fundPdfImportIndex);
+  fundPdfImportSkippedCount++;
+  fundPdfImportAdvanceOrFinish();
+}
+
+async function fundPdfImportConfirm() {
+  clearPfErrors();
+  let valid = true;
+
+  const c = fundPdfImportCandidates[fundPdfImportIndex];
+  const pickerVal = document.getElementById('pfFundPicker').value;
+  const isNewFund = pickerVal === '__new__';
+  const date = document.getElementById('pfDate').value;
+  const notes = document.getElementById('pfNotes').value;
+  const units = parseFloat(document.getElementById('pfUnits').value);
+  const nav = parseFloat(document.getElementById('pfNav').value);
+
+  if (!pickerVal) { setText('errPfFundPicker', 'Select a fund'); valid = false; }
+
+  const amcPickerVal = document.getElementById('pfFundAmcPicker').value;
+  const namePickerVal = document.getElementById('pfFundNamePicker').value;
+  const newFundAmc = amcPickerVal === '__other__' ? document.getElementById('pfFundAmc').value.trim() : amcPickerVal;
+  const newFundName = namePickerVal === '__other__' ? document.getElementById('pfFundName').value.trim() : namePickerVal;
+  if (isNewFund) {
+    if (!amcPickerVal) { setText('errPfFundPicker', 'Select an AMC'); valid = false; }
+    else if (!newFundAmc) { setText('errPfFundPicker', 'AMC name required'); valid = false; }
+    if (!newFundName) { setText('errPfFundName', 'Select or enter a fund name'); valid = false; }
+  }
+  if (!date) { setText('errPfDate', 'Date required'); valid = false; }
+  if (!units || units <= 0) { setText('errPfUnits', 'Must be a positive number'); valid = false; }
+  if (!nav || nav <= 0) { setText('errPfNav', 'Must be a positive number'); valid = false; }
+
+  if (!valid) return;
+
+  try {
+    let fundId = isNewFund ? null : parseInt(pickerVal, 10);
+    if (isNewFund) {
+      const res = await fetch('/api/funds/funds', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newFundName,
+          amc: newFundAmc,
+          category: document.getElementById('pfFundCategory').value.trim(),
+          // Seed with the statement's actual market price when we have one (the
+          // Investment Cost format) rather than the opening position's cost basis
+          // (nav) - the follow-up NAV update below sets it again regardless, but this
+          // avoids a brief window where CurrentNav reads as the cost price.
+          currentNav: c.marketPrice != null ? c.marketPrice : nav,
+          navDate: date
+        })
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        toast(err.error || 'Could not create fund', 'error');
+        return;
+      }
+      const fund = await res.json();
+      fund.currentNav = parseFloat(fund.currentNav);
+      state.funds.funds.push(fund);
+      fundId = fund.id;
+    }
+
+    const res = await fetch('/api/funds/transactions/buy', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ fundId, date, units, nav, frontLoadPct: 0, notes })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not add opening position', 'error');
+      return;
+    }
+    const tx = await res.json();
+    tx.units = parseFloat(tx.units);
+    tx.nav = parseFloat(tx.nav);
+    tx.amount = parseFloat(tx.amount);
+    tx.frontLoadPct = parseFloat(tx.frontLoadPct) || 0;
+    tx.backLoadPct = parseFloat(tx.backLoadPct) || 0;
+    state.funds.transactions.push(tx);
+
+    // Investment Cost statements report today's market price alongside the cost basis
+    // used above for the opening position itself - push it as a NAV update too so
+    // unrealized gain/loss reads correctly immediately, not zero (cost == "current")
+    // until the next manual Update NAVs. Mirrors submitNavUpdates()'s own advance-only
+    // local-state update.
+    if (c.marketPrice != null) {
+      const navRes = await fetch('/api/funds/nav-updates', {
+        method: 'POST', credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ updates: [{ fundId, nav: c.marketPrice, date }] })
+      });
+      if (navRes.ok) {
+        const fund = state.funds.funds.find(f => f.id === fundId);
+        if (fund) {
+          const history = state.funds.navHistory[fundId] || (state.funds.navHistory[fundId] = []);
+          const existing = history.find(p => p.date === date);
+          if (existing) existing.nav = c.marketPrice;
+          else history.push({ date, nav: c.marketPrice });
+          if (date >= fund.navUpdatedAt) {
+            fund.currentNav = c.marketPrice;
+            fund.navUpdatedAt = date;
+          }
+        }
+      } else {
+        toast('Opening position added, but the current NAV update failed — set it manually via Update NAVs', 'warning');
+      }
+    }
+
+    fundPdfImportActedOn.add(fundPdfImportIndex);
+    fundPdfImportConfirmedCount++;
+    renderFundsView();
+    renderOverviewView();
+    fundPdfImportAdvanceOrFinish();
+  } catch (e) {
+    toast('Network error — could not add opening position', 'error');
+  }
+}
+
+let editFundTxId = null;
+
+function openEditFundTxModal(id) {
+  id = Number(id);
+  const tx = state.funds.transactions.find(t => t.id === id);
+  if (!tx) return;
+  const fund = state.funds.funds.find(f => f.id === tx.fundId);
+
+  editFundTxId = id;
+  document.getElementById('eftSummary').textContent =
+    `${tx.type.toUpperCase()} ${tx.units ? fNum(tx.units) + ' units of ' : ''}${fund ? fund.name : ''} on ${tx.date}`;
+  document.getElementById('eftDate').value = tx.date;
+  document.getElementById('eftNotes').value = tx.notes || '';
+  document.getElementById('editFundTxBackdrop').classList.add('open');
+}
+
+function closeEditFundTxModal() {
+  document.getElementById('editFundTxBackdrop').classList.remove('open');
+  editFundTxId = null;
+}
+
+async function submitEditFundTx() {
+  if (editFundTxId == null) return;
+  const date = document.getElementById('eftDate').value;
+  const notes = document.getElementById('eftNotes').value;
+  if (!date) { toast('Date required', 'error'); return; }
+
+  try {
+    const res = await fetch(`/api/funds/transactions/${editFundTxId}`, {
+      method: 'PUT', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date, notes })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not update transaction', 'error');
+      return;
+    }
+    const updated = await res.json();
+    const tx = state.funds.transactions.find(t => t.id === editFundTxId);
+    if (tx) { tx.date = updated.date; tx.notes = updated.notes; }
+    closeEditFundTxModal();
+    renderFundsView();
+    renderOverviewView();
+    toast('Fund transaction updated', 'info');
+  } catch (e) {
+    toast('Network error — could not update fund transaction', 'error');
+  }
+}
+
+// A NAV more than a week old is stale enough to flag - funds don't move intraday like
+// stocks, but a week of silence usually means it was just never re-entered.
+const NAV_STALE_DAYS = 7;
+function isNavStale(navUpdatedAt) {
+  if (!navUpdatedAt) return true;
+  const ageMs = Date.now() - new Date(navUpdatedAt).getTime();
+  return ageMs > NAV_STALE_DAYS * 24 * 60 * 60 * 1000;
+}
+
+function openNavUpdateModal() {
+  const funds = state.funds.funds;
+  const rowsEl = document.getElementById('navUpdateRows');
+  const today = new Date().toISOString().split('T')[0];
+
+  if (funds.length === 0) {
+    rowsEl.innerHTML = `<div class="no-data">No mutual funds yet — add one first</div>`;
+  } else {
+    rowsEl.innerHTML = funds.map(f => {
+      const stale = isNavStale(f.navUpdatedAt);
+      return `<div class="nav-update-row${stale ? ' stale' : ''}">
+        <div>
+          <div style="font-weight:600;font-size:13px">${escapeHtml(f.name)}</div>
+          <div style="font-size:11px;color:var(--txt3)">
+            Last updated ${f.navUpdatedAt}${stale ? ' <span class="price-status stale">stale</span>' : ''}
+          </div>
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">NAV (PKR)</label>
+          <input type="number" class="form-input mono nav-update-input" data-fund-id="${f.id}" value="${f.currentNav}" min="0.01" step="0.01">
+        </div>
+        <div class="form-group" style="margin:0">
+          <label class="form-label">As Of Date</label>
+          <input type="date" class="form-input nav-update-date" data-fund-id="${f.id}" value="${today}">
+        </div>
+      </div>`;
+    }).join('');
+  }
+
+  document.getElementById('navUpdateBackdrop').classList.add('open');
+}
+
+function closeNavUpdateModal() {
+  document.getElementById('navUpdateBackdrop').classList.remove('open');
+}
+
+async function submitNavUpdates() {
+  const inputs = document.querySelectorAll('.nav-update-input');
+  if (inputs.length === 0) return;
+
+  const updates = [];
+  for (const input of inputs) {
+    const fundId = parseInt(input.dataset.fundId, 10);
+    const nav = parseFloat(input.value);
+    const dateInput = document.querySelector(`.nav-update-date[data-fund-id="${fundId}"]`);
+    const date = dateInput ? dateInput.value : '';
+    if (!nav || nav <= 0) {
+      toast('Every NAV must be a positive number', 'error');
+      return;
+    }
+    if (!date) {
+      toast('Every row needs a date', 'error');
+      return;
+    }
+    updates.push({ fundId, nav, date });
+  }
+
+  try {
+    const res = await fetch('/api/funds/nav-updates', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ updates })
+    });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(err.error || 'Could not update NAVs', 'error');
+      return;
+    }
+
+    // Mirror the server's own advance-only rule (see POST /api/funds/nav-updates) rather
+    // than blindly overwriting - a backdated correction shouldn't make the local fund
+    // list disagree with what the server actually stored as CurrentNav.
+    for (const u of updates) {
+      const fund = state.funds.funds.find(f => f.id === u.fundId);
+      if (!fund) continue;
+      const history = state.funds.navHistory[u.fundId] || (state.funds.navHistory[u.fundId] = []);
+      const existing = history.find(p => p.date === u.date);
+      if (existing) existing.nav = u.nav;
+      else history.push({ date: u.date, nav: u.nav });
+
+      if (u.date >= fund.navUpdatedAt) {
+        fund.currentNav = u.nav;
+        fund.navUpdatedAt = u.date;
+      }
+    }
+
+    closeNavUpdateModal();
+    renderFundsView();
+    renderOverviewView();
+    toast(`Updated ${updates.length} fund NAV${updates.length === 1 ? '' : 's'}`, 'success');
+  } catch (e) {
+    toast('Network error — could not update NAVs', 'error');
+  }
+}
+
+/* ══════════════════════════════════════════════════════
    INIT
 ══════════════════════════════════════════════════════ */
+// Pure display toggle - no data is discarded when switching tabs, everything stays
+// loaded in `state` and just re-renders from it. Persisted so a refresh reopens the
+// same tab (matching the site's existing habit of small localStorage UI-preference
+// caches - see e.g. the chart range-toggle - not full data storage).
+function switchView(name) {
+  const views = { stocks: 'viewStocks', funds: 'viewFunds', overview: 'viewOverview' };
+  if (!views[name]) name = 'stocks';
+  for (const [key, id] of Object.entries(views)) {
+    document.getElementById(id).style.display = key === name ? '' : 'none';
+    document.getElementById('tabBtn' + key[0].toUpperCase() + key.slice(1)).classList.toggle('active', key === name);
+  }
+  try { localStorage.setItem('psxActiveTab', name); } catch {}
+}
+
 async function init() {
   if (!(await checkAuth())) return;
   updateAuthUI();
@@ -6294,6 +8640,10 @@ async function init() {
   renderAll();
   loadPsxSymbols();
   checkImportLocalData();
+
+  let savedTab = 'stocks';
+  try { savedTab = localStorage.getItem('psxActiveTab') || 'stocks'; } catch {}
+  switchView(savedTab);
 
   // Live prices/index on load, then every 15s - refreshPrices() already guards against
   // overlapping runs via isFetching, so a slow call just gets skipped by the next tick
