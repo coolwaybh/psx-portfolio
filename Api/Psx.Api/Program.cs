@@ -35,6 +35,7 @@ builder.Services.AddSingleton<PsxSymbolDirectory>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<FundamentalAnalysisService>();
 builder.Services.AddScoped<MufapNavSyncService>();
+builder.Services.AddHostedService<MufapNavDailySyncWorker>();
 
 builder.Services.AddHttpClient<PsxHistoricalPriceService>(client =>
 {

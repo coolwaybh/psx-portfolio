@@ -4236,7 +4236,7 @@ async function refreshPrices(silent = false) {
     }
 
     savePricesCache();
-    renderAll();
+    renderAll(true); // skip funds - nothing about a stock-price tick affects fund data
 
     const ts = new Date().toLocaleTimeString();
     document.getElementById('lastUpdated').textContent = ts;
@@ -4623,7 +4623,7 @@ function renderCharts() {
     const snapshots = computeCumulativePLSnapshots();
     if (snapshots.length) {
       const allSymbols = [...new Set(state.transactions.map(t => t.symbol))];
-      loadPriceHistory(allSymbols).then(gotNew => { if (gotNew) renderAll(); });
+      loadPriceHistory(allSymbols).then(gotNew => { if (gotNew) renderAll(true); }); // stock history landing - funds untouched
 
       const todayStr = new Date().toISOString().split('T')[0];
       const points = snapshots.map(s => {
@@ -5405,7 +5405,14 @@ function renderCashLedger() {
 /* ══════════════════════════════════════════════════════
    RENDER ALL
 ══════════════════════════════════════════════════════ */
-function renderAll() {
+// skipFunds: true from refreshPrices()'s 15s auto-tick (see below) - none of Mutual Funds'
+// tables/charts depend on state.prices (live stock prices), so re-rendering them on every
+// tick was pure churn: flickering charts and rebuilding tables on a tab the user might be
+// actively looking at, for data that hadn't actually changed. Fund data still renders
+// immediately after every real fund action (see e.g. submitFundTransaction) and once here on
+// initial load - this only skips the redundant re-renders from a price tick that has nothing
+// to do with funds.
+function renderAll(skipFunds = false) {
   renderKPIs();
   renderHoldingsTable();
   renderCharts();
@@ -5416,7 +5423,7 @@ function renderAll() {
   renderCashLedger();
   renderTaxReport();
   renderSettingsUI();
-  renderFundsView();
+  if (!skipFunds) renderFundsView();
   renderOverviewView();
   updateHeaderOwnerName();
 }
