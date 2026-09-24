@@ -598,6 +598,7 @@ a{color:var(--accent);text-decoration:none}
   <button class="tab-btn" id="tabBtnStocks" onclick="switchView('stocks')">Stocks</button>
   <button class="tab-btn" id="tabBtnFunds" onclick="switchView('funds')">Mutual Funds</button>
   <button class="tab-btn" id="tabBtnOverview" onclick="switchView('overview')">Overview</button>
+  <button class="tab-btn" id="tabBtnCgt" onclick="switchView('cgt')">CGT</button>
 </div>
 
 <div id="viewStocks">
@@ -1583,6 +1584,45 @@ a{color:var(--accent);text-decoration:none}
         <div class="chart-title">Combined Portfolio Value Over Time</div>
         <div class="chart-body"><canvas id="ovValueChart"></canvas></div>
       </div>
+    </div>
+  </section>
+</div>
+
+<div id="viewCgt" style="display:none">
+  <section class="section" style="padding-bottom:40px">
+    <div class="section-hd">
+      <div class="section-title">Capital Gains Tax <span class="badge" id="cgtCount">0</span></div>
+    </div>
+    <div class="txlog-filters" style="align-items:center">
+      <span style="font-size:11px;color:var(--txt3)">View period:</span>
+      <input type="date" id="cgtFilterFrom" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderCgtLedger()">
+      <span style="font-size:11px;color:var(--txt3)">to</span>
+      <input type="date" id="cgtFilterTo" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderCgtLedger()">
+      <button class="btn btn-sm" onclick="clearCgtDateFilter()">Clear</button>
+    </div>
+    <div class="rpnl-summary" id="cgtLedgerSummary">
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">CGT in Period</div>
+        <div class="rpnl-val" id="cgtPeriodTotal">—</div>
+      </div>
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Total CGT (All Time)</div>
+        <div class="rpnl-val" id="cgtAllTimeTotal">—</div>
+      </div>
+    </div>
+    <div class="tbl-wrap">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="text-align:left">Date</th>
+            <th style="text-align:left">Type</th>
+            <th style="text-align:left">Symbol / Fund</th>
+            <th>CGT Withheld</th>
+            <th style="text-align:left">Notes</th>
+          </tr>
+        </thead>
+        <tbody id="cgtTbody"></tbody>
+      </table>
     </div>
   </section>
 </div>
@@ -2853,7 +2893,7 @@ let state = {
   marketVolume: null, // { volume, value } total shares/PKR traded across PSX today, or null until first fetched
   // Per-table "show all" toggles (Transaction History / Realized P&L / Cash Ledger) -
   // in-memory only, not persisted or synced from the server, resets on reload.
-  ui: { showAllTx: false, showAllRealized: false, showAllCash: false }
+  ui: { showAllTx: false, showAllRealized: false, showAllCash: false, showAllCgt: false }
 };
 
 // Long tables (Transaction History, Realized P&L, Cash Ledger) default to the most
@@ -6027,6 +6067,76 @@ function renderCashLedger() {
 }
 
 /* ══════════════════════════════════════════════════════
+   RENDER — CGT LEDGER
+   Combines both places CGT already gets recorded - CashEntry.cgtAmount (stock sells,
+   see POST /api/ledger) and FundTransaction.cgtAmount (fund sells, see POST
+   /api/funds/transactions/sell) - into one dated ledger. Read-only aggregation of data
+   that already exists; no separate CGT table or endpoint, same reasoning as
+   renderOverviewView() combining stocks+funds from data already in `state`.
+══════════════════════════════════════════════════════ */
+function computeCgtLedger() {
+  const fromStocks = state.cash.entries
+    .filter(c => c.cgtAmount != null && c.cgtAmount > 0)
+    .map(c => ({ id: `cash-${c.id}`, date: c.date, type: 'Stock', label: c.symbol || '—', cgtAmount: c.cgtAmount, notes: c.notes || '' }));
+
+  const fromFunds = state.funds.transactions
+    .filter(t => t.cgtAmount != null && t.cgtAmount > 0)
+    .map(t => {
+      const fund = state.funds.funds.find(f => f.id === t.fundId);
+      return { id: `fund-${t.id}`, date: t.date, type: 'Fund', label: fund ? fund.name : '—', cgtAmount: t.cgtAmount, notes: t.notes || '' };
+    });
+
+  return [...fromStocks, ...fromFunds];
+}
+
+function clearCgtDateFilter() {
+  document.getElementById('cgtFilterFrom').value = '';
+  document.getElementById('cgtFilterTo').value = '';
+  renderCgtLedger();
+}
+
+function renderCgtLedger() {
+  const all = computeCgtLedger();
+  setText('cgtCount', all.length);
+
+  const tbody = document.getElementById('cgtTbody');
+  const summaryEl = document.getElementById('cgtLedgerSummary');
+  if (!tbody) return; // view not in the DOM yet on first paint before init() finishes
+  if (all.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No CGT withheld yet — it shows up here automatically the moment a stock or fund sell records one</div></td></tr>`;
+    if (summaryEl) summaryEl.style.display = 'none';
+    return;
+  }
+  if (summaryEl) summaryEl.style.display = '';
+
+  const fromVal = document.getElementById('cgtFilterFrom')?.value || '';
+  const toVal   = document.getElementById('cgtFilterTo')?.value || '';
+  const inPeriod = all.filter(c => (!fromVal || c.date >= fromVal) && (!toVal || c.date <= toVal));
+
+  const allTimeTotal = all.reduce((sum, c) => sum + c.cgtAmount, 0);
+  const periodTotal = inPeriod.reduce((sum, c) => sum + c.cgtAmount, 0);
+  document.getElementById('cgtAllTimeTotal').textContent = fPKR(allTimeTotal);
+  document.getElementById('cgtPeriodTotal').textContent = fPKR(periodTotal);
+
+  if (inPeriod.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No CGT withheld in this date range</div></td></tr>`;
+    return;
+  }
+
+  const newestFirst = [...inPeriod].sort((a,b) => new Date(b.date) - new Date(a.date) || String(b.id).localeCompare(String(a.id)));
+  const showAll = state.ui.showAllCgt;
+  const displayed = showAll ? newestFirst : newestFirst.slice(0, ROW_LIMIT);
+
+  tbody.innerHTML = displayed.map(c => `<tr>
+    <td style="text-align:left;font-family:var(--mono)">${c.date}</td>
+    <td style="text-align:left"><span class="tx-type sell">${c.type.toUpperCase()}</span></td>
+    <td style="text-align:left"><span class="sym">${escapeHtml(c.label)}</span></td>
+    <td class="val-neg">${fPKR(c.cgtAmount)}</td>
+    <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(c.notes)||'—'}</td>
+  </tr>`).join('') + showAllRowHtml(newestFirst.length, showAll, 'showAllCgt', 5);
+}
+
+/* ══════════════════════════════════════════════════════
    RENDER ALL
 ══════════════════════════════════════════════════════ */
 // skipFunds: true from refreshPrices()'s 15s auto-tick (see below) - none of Mutual Funds'
@@ -6049,6 +6159,7 @@ function renderAll(skipFunds = false) {
   renderSettingsUI();
   if (!skipFunds) renderFundsView();
   renderOverviewView();
+  renderCgtLedger();
   updateHeaderOwnerName();
 }
 
@@ -8734,6 +8845,7 @@ async function submitFundTransaction() {
     closeFundModal();
     renderFundsView();
     renderOverviewView();
+    renderCgtLedger();
   } catch (e) {
     toast('Network error — could not add fund transaction', 'error');
   }
@@ -8757,6 +8869,7 @@ async function deleteFundTransaction(id) {
     state.funds.transactions = state.funds.transactions.filter(t => t.id !== id);
     renderFundsView();
     renderOverviewView();
+    renderCgtLedger();
     toast('Fund transaction removed', 'info');
   } catch (e) {
     toast('Network error — could not delete fund transaction', 'error');
@@ -9094,6 +9207,7 @@ async function fundPdfImportConfirm() {
     fundPdfImportConfirmedCount++;
     renderFundsView();
     renderOverviewView();
+    renderCgtLedger();
     fundPdfImportAdvanceOrFinish();
   } catch (e) {
     toast('Network error — could not add opening position', 'error');
@@ -9144,6 +9258,7 @@ async function submitEditFundTx() {
     closeEditFundTxModal();
     renderFundsView();
     renderOverviewView();
+    renderCgtLedger();
     toast('Fund transaction updated', 'info');
   } catch (e) {
     toast('Network error — could not update fund transaction', 'error');
@@ -9325,7 +9440,7 @@ async function submitNavUpdates() {
 // same tab (matching the site's existing habit of small localStorage UI-preference
 // caches - see e.g. the chart range-toggle - not full data storage).
 function switchView(name) {
-  const views = { stocks: 'viewStocks', funds: 'viewFunds', overview: 'viewOverview' };
+  const views = { stocks: 'viewStocks', funds: 'viewFunds', overview: 'viewOverview', cgt: 'viewCgt' };
   if (!views[name]) name = 'stocks';
   for (const [key, id] of Object.entries(views)) {
     document.getElementById(id).style.display = key === name ? '' : 'none';
@@ -9334,12 +9449,14 @@ function switchView(name) {
   // KSE-100/volume/refresh-timer describe live stock prices, never funds (NAV is manual/daily
   // only) - hide the group on the Mutual Funds tab so it doesn't look like fund data is
   // auto-refreshing too. Left visible on Overview, which still mixes in live stock value.
+  // The CGT tab is a purely historical ledger (dates/amounts already recorded) regardless of
+  // today's prices, so it's grouped with Funds here, not Overview.
   const tickerGroup = document.getElementById('stockTickerGroup');
-  if (tickerGroup) tickerGroup.style.display = name === 'funds' ? 'none' : '';
+  if (tickerGroup) tickerGroup.style.display = (name === 'funds' || name === 'cgt') ? 'none' : '';
   // "+ Add Transaction" in the header opens the stock modal specifically - the Funds tab
   // has its own equivalent button, so this one is dead weight (and confusing) there.
   const addStockBtn = document.getElementById('headerAddStockTxBtn');
-  if (addStockBtn) addStockBtn.style.display = name === 'funds' ? 'none' : '';
+  if (addStockBtn) addStockBtn.style.display = (name === 'funds' || name === 'cgt') ? 'none' : '';
   try { localStorage.setItem('psxActiveTab', name); } catch {}
 }
 
