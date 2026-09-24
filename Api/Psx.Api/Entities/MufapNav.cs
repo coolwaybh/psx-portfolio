@@ -11,6 +11,14 @@ public class MufapNav
 {
     public int Id { get; set; }
     public string FundName { get; set; } = "";
+    // AMC and Category ride along on the same daily scrape as Nav (same MUFAP row) - added
+    // so this cache can also back the AMC/fund-name directory the frontend's "Add New Fund"
+    // picker and the PDF-import matcher use (see GET /api/funds/amc-directory), replacing a
+    // hand-maintained hardcoded list that goes stale the moment an AMC changes its lineup
+    // (confirmed against Faysal Asset Management: several of its old hardcoded entries had
+    // been discontinued/renamed, and 21 of its 30 real current funds were missing outright).
+    public string Amc { get; set; } = "";
+    public string Category { get; set; } = "";
     public decimal Nav { get; set; }
     public DateOnly AsOfDate { get; set; }
     public DateTime FetchedAtUtc { get; set; }

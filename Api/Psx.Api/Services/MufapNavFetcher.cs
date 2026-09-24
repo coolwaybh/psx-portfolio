@@ -3,7 +3,7 @@ using System.Text.RegularExpressions;
 
 namespace Psx.Api.Services;
 
-public record MufapNavEntry(string FundName, decimal Nav, DateOnly AsOfDate);
+public record MufapNavEntry(string FundName, string Amc, string Category, decimal Nav, DateOnly AsOfDate);
 
 // Fetches and parses MUFAP's industry-wide daily "NAVs and Sale Loads" page - the single
 // authoritative source for every open-end fund's NAV, published once per business day (usually
@@ -25,6 +25,12 @@ public static class MufapNavFetcher
         return Parse(markdown);
     }
 
+    // Each AMC's fund rows are preceded by its own group-header line,
+    // "| [AMC Name](.../FundDirectory?group=...) |" - tracked as "current AMC" while
+    // scanning, same technique used to build the AMC/fund audit that replaced the old
+    // hardcoded AMC_FUNDS list.
+    static readonly Regex AmcHeaderRegex = new(@"^\| \[(?<amc>[^\]]+)\]\(https://www\.mufap\.com\.pk/FundProfile/FundDirectory\?group=", RegexOptions.Compiled);
+
     // Every fund row (~400/day) renders as one markdown table line:
     // "| Open-End Funds | [Fund Name](url) | Category | Inception Date | Offer | Repurchase |
     //  NAV | Validity Date | Front-end | Back-end | Contingent | Market | Trustee |"
@@ -36,10 +42,19 @@ public static class MufapNavFetcher
     public static List<MufapNavEntry> Parse(string markdown)
     {
         var entries = new List<MufapNavEntry>();
+        string? currentAmc = null;
         foreach (var rawLine in markdown.Split('\n'))
         {
             var line = rawLine.Trim();
-            if (!line.StartsWith("| Open-End Funds |", StringComparison.Ordinal)) continue;
+
+            var amcMatch = AmcHeaderRegex.Match(line);
+            if (amcMatch.Success)
+            {
+                currentAmc = System.Net.WebUtility.HtmlDecode(amcMatch.Groups["amc"].Value).Trim();
+                continue;
+            }
+
+            if (!line.StartsWith("| Open-End Funds |", StringComparison.Ordinal) || currentAmc is null) continue;
 
             var cols = line.Split('|').Select(c => c.Trim()).ToArray();
             if (cols.Length < 9) continue;
@@ -49,12 +64,14 @@ public static class MufapNavFetcher
             var name = System.Net.WebUtility.HtmlDecode(nameMatch.Groups["name"].Value).Trim();
             if (name.Length == 0) continue;
 
+            var category = cols[3];
+
             if (!decimal.TryParse(cols[7], NumberStyles.Number, CultureInfo.InvariantCulture, out var nav) || nav <= 0)
                 continue;
             if (!DateTime.TryParseExact(cols[8], "MMM d, yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out var asOf))
                 continue;
 
-            entries.Add(new MufapNavEntry(name, nav, DateOnly.FromDateTime(asOf)));
+            entries.Add(new MufapNavEntry(name, currentAmc, category, nav, DateOnly.FromDateTime(asOf)));
         }
         return entries;
     }

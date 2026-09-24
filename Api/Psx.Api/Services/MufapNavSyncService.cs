@@ -16,17 +16,22 @@ public record MufapSyncResult(int Updated, int TotalFunds, List<string> Unmatche
 // reason.
 public class MufapNavSyncService(PsxDbContext db, IHttpClientFactory httpFactory)
 {
-    public async Task<MufapSyncResult> SyncAsync(int userId)
+    // force: bypasses the "already fetched today" check - used by the manual "Sync Stocks &
+    // Funds" button in Settings, so a user who knows MUFAP just published (or added a new
+    // fund mid-day) isn't stuck waiting for the automatic once-a-day fetch. The automatic
+    // paths (page-load sync, MufapNavDailySyncWorker) always pass false, to keep the
+    // once-a-day cost guarantee for everyone who isn't explicitly asking for a re-check.
+    public async Task<MufapSyncResult> SyncAsync(int userId, bool force = false)
     {
-        await RefreshCacheIfStaleAsync();
+        await RefreshCacheIfStaleAsync(force);
         return await ApplyToUserFundsAsync(userId);
     }
 
-    async Task RefreshCacheIfStaleAsync()
+    async Task RefreshCacheIfStaleAsync(bool force)
     {
         var today = DateTime.UtcNow.Date;
         var latestFetch = await db.MufapNavs.MaxAsync(m => (DateTime?)m.FetchedAtUtc);
-        if (latestFetch is not null && latestFetch.Value.Date == today) return;
+        if (!force && latestFetch is not null && latestFetch.Value.Date == today) return;
 
         List<MufapNavEntry> entries;
         try
@@ -56,13 +61,15 @@ public class MufapNavSyncService(PsxDbContext db, IHttpClientFactory httpFactory
                 if (existing.TryGetValue(key, out var row))
                 {
                     row.FundName = e.FundName;
+                    row.Amc = e.Amc;
+                    row.Category = e.Category;
                     row.Nav = e.Nav;
                     row.AsOfDate = e.AsOfDate;
                     row.FetchedAtUtc = now;
                 }
                 else
                 {
-                    var newRow = new MufapNav { FundName = e.FundName, Nav = e.Nav, AsOfDate = e.AsOfDate, FetchedAtUtc = now };
+                    var newRow = new MufapNav { FundName = e.FundName, Amc = e.Amc, Category = e.Category, Nav = e.Nav, AsOfDate = e.AsOfDate, FetchedAtUtc = now };
                     db.MufapNavs.Add(newRow);
                     existing[key] = newRow;
                 }

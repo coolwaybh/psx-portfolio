@@ -161,6 +161,8 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
         modelBuilder.Entity<MufapNav>(b =>
         {
             b.Property(m => m.FundName).HasMaxLength(200);
+            b.Property(m => m.Amc).HasMaxLength(150);
+            b.Property(m => m.Category).HasMaxLength(100);
             b.Property(m => m.Nav).HasColumnType("decimal(18,4)");
             b.HasIndex(m => m.FundName).IsUnique();
         });

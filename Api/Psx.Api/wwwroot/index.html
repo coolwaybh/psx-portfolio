@@ -581,7 +581,10 @@ a{color:var(--accent);text-decoration:none}
       <span id="volumeTicker" class="market-ticker" title="Total shares traded across PSX today"></span>
       <span id="refreshTimer" class="refresh-timer" title="Prices auto-refresh every 15 seconds"></span>
     </span>
-    <button class="btn btn-sm btn-primary" onclick="openModal()">
+    <!-- Stock-only, same reasoning as stockTickerGroup above - opens the stock buy/sell
+         modal, so it's redundant and confusing on the Mutual Funds tab, which already has
+         its own "+ Add Transaction" button for funds. Hidden there by switchView(). -->
+    <button class="btn btn-sm btn-primary" id="headerAddStockTxBtn" onclick="openModal()">
       + Add Transaction
     </button>
     <button class="btn btn-sm btn-icon" onclick="openSettings()" title="Settings">⚙</button>
@@ -1818,6 +1821,19 @@ a{color:var(--accent);text-decoration:none}
     </div>
 
     <div class="settings-section">
+      <div class="settings-label">Reference Data</div>
+      <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
+        The PSX stock list and the MUFAP AMC/fund directory (used by the symbol autocomplete
+        and the "Add New Fund" picker) already refresh on their own - stocks on every page
+        load, funds at least once an hour in the background. Use this only if you know
+        something new was just listed and don't want to wait.
+      </div>
+      <button class="btn" style="width:100%;justify-content:center" id="syncStocksFundsBtn" onclick="syncStocksAndFunds()">
+        ↻ Sync Stocks &amp; Funds
+      </button>
+    </div>
+
+    <div class="settings-section">
       <div class="settings-label">Data</div>
       <div style="display:flex;flex-direction:column;gap:8px">
         <button class="btn" style="width:100%;justify-content:center" onclick="loadSampleData()">
@@ -1865,151 +1881,719 @@ const CHART_PALETTE = [
   '#7c3aed','#9f1239'
 ];
 
-// Major Pakistani AMCs and their flagship open-end funds, for the AMC -> Fund picker in
-// the "Add New Fund" form (see onFundAmcPickerChange/onFundNamePickerChange). Sourced
-// from MUFAP member listings and each AMC's own site - NOT exhaustive (MUFAP lists 500+
-// schemes across smaller AMCs, closed-end plans, and pension sub-funds), just the
-// flagship funds an individual investor is most likely to actually hold. Every picker
-// built from this also gets an "Other (type manually)" escape hatch at both the AMC and
-// fund level, so a fund missing from this list is never a dead end.
-const AMC_FUNDS = {
+// `let`, not `const` - loadAmcFundsDirectory() (below) silently upgrades both this and
+// FUND_CATEGORY from GET /api/funds/amc-directory (the MufapNavs cache, kept current by
+// the daily sync) once it loads, same "instant hardcoded baseline, then upgrade" pattern
+// as PSX_SYMBOLS_FALLBACK/loadPsxSymbols() for stocks. This hardcoded copy (verified
+// against MUFAP on 2026-09-24) is only the zero-network fallback shown before that
+// resolves, or if the fetch fails outright - not the source of truth going forward, so it
+// no longer needs hand-maintenance the way it did when it WAS the source of truth (that's
+// exactly how Faysal Asset Management went stale: 21 of its 30 real current funds were
+// missing, and several hardcoded entries had been discontinued/renamed).
+let AMC_FUNDS = {
+  // Every AMC list below was verified against MUFAP's own daily NAV list (2026-09-24) -
+  // full current lineup, not a hand-picked subset. An earlier version of this file curated
+  // just a handful of "flagship" funds per AMC, but that drifted badly stale over time
+  // (confirmed against Faysal Asset Management specifically: several of its old entries -
+  // Faysal Stock Fund, Faysal MTS Fund, Faysal Money Market Fund, Faysal Income & Growth
+  // Fund, Faysal Asset Allocation Fund - no longer exist on MUFAP at all, and the AMC's
+  // real lineup turned out to be 30 funds, not 9). Every picker still falls back to
+  // "Other (type manually)" at both the AMC and fund level regardless, so a fund that's
+  // somehow still missing (a very recent launch, a fund under an AMC not covered here) is
+  // never a dead end - manual entry always works.
   'Al Meezan Investment Management Limited': [
-    'Meezan Islamic Fund', 'Al Meezan Mutual Fund', 'Meezan Balanced Fund',
-    'Meezan Islamic Income Fund', 'Meezan Cash Fund', 'Meezan Sovereign Fund',
-    'KSE Meezan Index Fund', 'Meezan Asset Allocation Fund', 'Meezan Energy Fund',
-    'Meezan Rozana Amdani Fund', 'Meezan Gold Fund', 'Meezan Dedicated Equity Fund'
+    'Al Meezan Mutual Fund',
+    'KSE Meezan Index Fund',
+    'Meezan Asset Allocation Fund',
+    'Meezan Balanced Fund',
+    'Meezan Capital Protected Fund III (Meezan Capital Secure Plan I)',
+    'Meezan Cash Fund',
+    'Meezan Daily Income Fund (MDIP I)',
+    'Meezan Daily Income Fund (Meezan Mahana Munafa Plan)',
+    'Meezan Daily Income Fund (Meezan Munafa Plan I)',
+    'Meezan Daily Income Fund (Meezan Sehl Account Plan) (MSHP)',
+    'Meezan Daily Income Fund (Meezan Super Saver Plan) (MSSP)',
+    'Meezan Dynamic Asset Allocation Fund (Meezan Dividend Yield Plan)',
+    'Meezan Energy Fund',
+    'Meezan Financial Planning Fund of Funds (Aggressive)',
+    'Meezan Financial Planning Fund of Funds (Conservative)',
+    'Meezan Financial Planning Fund of Funds (MAAP I)',
+    'Meezan Financial Planning Fund of Funds (Moderate)',
+    'Meezan Financial Planning Fund of Funds (Very Conservative Allocation Plan)',
+    'Meezan Gold Fund',
+    'Meezan Government Securities Fund Plan I',
+    'Meezan Islamic Asaan Cash Fund',
+    'Meezan Islamic Fund',
+    'Meezan Islamic Income Fund',
+    'Meezan Paidaar Munafa Plan 34',
+    'Meezan Paidaar Munafa Plan 39',
+    'Meezan Paidaar Munafa Plan 43',
+    'Meezan Paidaar Munafa Plan 47',
+    'Meezan Paidaar Munafa Plan 48',
+    'Meezan Paidaar Munafa Plan 49',
+    'Meezan Paidaar Munafa Plan 50',
+    'Meezan Paidaar Munafa Plan 52',
+    'Meezan Paidaar Munafa Plan 53',
+    'Meezan Paidaar Munafa Plan 54',
+    'Meezan Rozana Amdani Fund',
+    'Meezan Sovereign Fund',
+    'Meezan Strategic Allocation Fund (MSAP I)',
+    'Meezan Strategic Allocation Fund (MSAP II)',
+    'Meezan Strategic Allocation Fund (MSAP III)',
+    'Meezan Strategic Allocation Fund (MSAP IV)',
+    'Meezan Strategic Allocation Fund (MSAP V)'
   ],
   'NBP Fund Management Limited': [
-    'NBP Stock Fund', 'NBP Money Market Fund', 'NBP Savings Fund',
-    'NBP Income Opportunity Fund', 'NBP Sarmaya Izafa Fund', 'NBP Balanced Fund',
-    'NBP Financial Sector Fund', 'NBP Government Securities Savings Fund',
-    'NBP Islamic Stock Fund', 'NBP Islamic Money Market Fund', 'NBP Islamic Savings Fund',
-    'NBP Islamic Sarmaya Izafa Fund', 'NBP Islamic Energy Fund',
-    'NBP Pakistan Growth Exchange Traded Fund'
+    'NBP Balanced Fund',
+    'NBP Cash Plan I',
+    'NBP Cash Plan II',
+    'NBP Financial Sector Fund',
+    'NBP Financial Sector Income Fund',
+    'NBP Financial Sector Income Plus Fund',
+    'NBP Fixed Term Munafa Plan VIB (NBP Mustahkam Fund I)',
+    'NBP Fixed Term Munafa Plan VIIB (NBP Mustahkam Fund I)',
+    'NBP Fixed Term Munafa Plan XIIB (NBP Mustahkam Fund II)',
+    'NBP Fixed Term Munafa Plan XIII (NBP Mustahkam Fund II)',
+    'NBP Fixed Term Munafa Plan XIIIB (NBP Mustahkam Fund II)',
+    'NBP Fixed Term Munafa Plan XIVB',
+    'NBP Fixed Term Munafa Plan XXA (NBP Mustahkam Fund II)',
+    'NBP Government Securities Liquid Fund',
+    'NBP Government Securities Plan IV',
+    'NBP Government Securities Savings Fund',
+    'NBP Income Opportunity Fund',
+    'NBP Income Plan I',
+    'NBP Islamic Daily Dividend Fund',
+    'NBP Islamic Energy Fund',
+    'NBP Islamic Fixed Term Munafa Plan IIB (NBP Islamic Mustahkam Fund)',
+    'NBP Islamic Fixed Term Munafa Plan VIB (NBP Islamic Mustahkam Fund)',
+    'NBP Islamic Gold Fund',
+    'NBP Islamic Government Securities Plan III',
+    'NBP Islamic Income Fund',
+    'NBP Islamic Mahana Amdani Fund',
+    'NBP Islamic Money Market Fund',
+    'NBP Islamic Money Market Liquid Fund',
+    'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan I)',
+    'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan II)',
+    'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan III)',
+    'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan IV)',
+    'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan V)',
+    'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan VI)',
+    'NBP Islamic Sarmaya Izafa Fund',
+    'NBP Islamic Savings Fund',
+    'NBP Islamic Stock Fund',
+    'NBP Mahana Amdani Fund',
+    'NBP Money Market Fund',
+    'NBP Money Market Liquid Fund',
+    'NBP Riba Free Savings Fund',
+    'NBP Sarmaya Izafa Fund',
+    'NBP Savings Fund',
+    'NBP Savings Plus Fund',
+    'NBP Stock Fund'
   ],
   'UBL Fund Managers Limited': [
-    'UBL Stock Advantage Fund', 'UBL Money Market Fund', 'UBL Liquidity Plus Fund',
-    'UBL Growth and Income Fund', 'UBL Retirement Savings Fund', 'UBL Government Securities Fund',
-    'Al-Ameen Shariah Stock Fund', 'Al-Ameen Islamic Cash Fund', 'Al-Ameen Islamic Sovereign Fund',
-    'Al-Ameen Islamic Aggressive Income Fund', 'Al-Ameen Islamic Dedicated Equity Fund',
-    'Al-Ameen Islamic Retirement Savings Fund', 'Al-Ameen Islamic Asset Allocation Fund',
-    'Al-Ameen Islamic Energy Fund'
+    'Al Ameen Islamic Aggressive Income Fund',
+    'Al Ameen Islamic Aggressive Income Plan I',
+    'Al Ameen Islamic Asset Allocation Fund',
+    'Al Ameen Islamic Cash Fund',
+    'Al Ameen Islamic Cash Plan I',
+    'Al Ameen Islamic Energy Fund',
+    'Al Ameen Islamic Income Fund',
+    'Al Ameen Islamic Sovereign Fund',
+    'Al Ameen Shariah Stock Fund',
+    'UBL Asset Allocation Fund',
+    'UBL Cash Fund',
+    'UBL Financial Sector Fund',
+    'UBL Fixed Return Plan III (Y)',
+    'UBL Fixed Return Plan III (Z)',
+    'UBL Government Securities Fund',
+    'UBL Growth & Income Fund',
+    'UBL Income Opportunity Fund',
+    'UBL Liquidity Fund',
+    'UBL Liquidity Plus Fund',
+    'UBL Money Market Fund',
+    'UBL Special Savings Plan X',
+    'UBL Stock Advantage Fund'
   ],
   'HBL Asset Management Limited': [
-    'HBL Stock Fund', 'HBL Equity Fund', 'HBL Growth Fund', 'HBL Money Market Fund',
-    'HBL Cash Fund', 'HBL Income Fund', 'HBL Government Securities Fund',
-    'HBL Financial Sector Income Fund', 'HBL Multi Asset Fund',
-    'HBL Islamic Stock Fund', 'HBL Islamic Equity Fund', 'HBL Islamic Money Market Fund',
-    'HBL Islamic Income Fund', 'HBL Islamic Asset Allocation Fund', 'HBL Islamic Dedicated Equity Fund'
+    'HBL Cash Fund',
+    'HBL Energy Fund',
+    'HBL Equity Fund',
+    'HBL Financial Sector Income Fund Plan I',
+    'HBL Financial Sector Income Fund Plan II',
+    'HBL Government Securities Fund',
+    'HBL Growth Fund-Class A',
+    'HBL Growth Fund-Class B',
+    'HBL Income Fund',
+    'HBL Investment Fund-Class A',
+    'HBL Investment Fund-Class B',
+    'HBL Islamic Asset Allocation Fund',
+    'HBL Islamic Equity Fund',
+    'HBL Islamic Fixed Term Fund Plan 11',
+    'HBL Islamic Fixed Term Fund Plan 12',
+    'HBL Islamic Income Fund',
+    'HBL Islamic Money Market Fund',
+    'HBL Islamic Regular Income Fund',
+    'HBL Islamic Savings Plan I',
+    'HBL Islamic Stock Fund',
+    'HBL Mehfooz Munafa Fund Plan XI',
+    'HBL Mehfooz Munafa Fund Plan XIV',
+    'HBL Mehfooz Munafa Fund Plan XVIII',
+    'HBL Money Market Fund',
+    'HBL Multi Asset Fund',
+    'HBL Regular Income Fund',
+    'HBL Stock Fund'
   ],
   'MCB Investment Management Limited': [
-    'MCB Pakistan Stock Market Fund', 'MCB Cash Management Optimizer',
-    'MCB Pakistan Asset Allocation Fund', 'MCB Pakistan Sovereign Fund',
-    'MCB Pakistan Income Fund', 'MCB Pakistan Frequent Payout Fund',
-    'Alhamra Islamic Stock Fund', 'Alhamra Islamic Income Fund',
-    'Alhamra Islamic Money Market Fund', 'Alhamra Islamic Asset Allocation Fund'
+    'Alhamra Cash Management Optimizer',
+    'Alhamra Daily Dividend Fund',
+    'Alhamra Government Securities Plan I',
+    'Alhamra Islamic Asset Allocation Fund',
+    'Alhamra Islamic Cash Fund',
+    'Alhamra Islamic Energy Fund',
+    'Alhamra Islamic Income Fund',
+    'Alhamra Islamic Investment Savings Fund',
+    'Alhamra Islamic Money Market Fund',
+    'Alhamra Islamic Stock Fund',
+    'Alhamra Opportunity Fund (Dividend Strategy Plan)',
+    'Alhamra Smart Portfolio',
+    'Alhamra Wada Plan XXII',
+    'MCB Cash Management Optimizer',
+    'MCB DCF Fixed Return Plan XI',
+    'MCB DCF Fixed Return Plan XII',
+    'MCB DCF Fixed Return Plan XIII',
+    'MCB DCF Fixed Return Plan XIV',
+    'MCB DCF Income Fund',
+    'MCB Financial Sector Fund',
+    'MCB Government Securities Plan I',
+    'MCB Investment Savings Plan I',
+    'MCB Money Market Fund',
+    'MCB Pakistan Asset Allocation Fund',
+    'MCB Pakistan Opportunity Fund (MCB Pakistan Dividend Yield Plan)',
+    'MCB Pakistan Sovereign Fund',
+    'MCB Pakistan Stock Market Fund',
+    'Pakistan Capital Market Fund',
+    'Pakistan Cash Management Fund',
+    'Pakistan Income Enhancement Fund',
+    'Pakistan Income Fund'
   ],
   'ABL Asset Management Company Limited': [
-    'ABL Stock Fund', 'ABL Cash Fund', 'ABL Income Fund', 'ABL Government Securities Fund',
-    'ABL Financial Planning Fund', 'ABL Islamic Stock Fund', 'ABL Islamic Cash Fund',
-    'ABL Islamic Income Fund', 'ABL Islamic Dedicated Stock Fund', 'ABL Islamic Financial Planning Fund'
+    'ABL Cash Fund',
+    'ABL Financial Sector Fund Plan I',
+    'ABL Fixed Rate Plan XXIX',
+    'ABL Fixed Rate Plan XXVII',
+    'ABL Fixed Rate Plan XXVIII',
+    'ABL Fixed Rate Plan XXX',
+    'ABL Fixed Rate Plan XXXI',
+    'ABL Government Securities Fund',
+    'ABL Income Fund',
+    'ABL Islamic Asset Allocation Fund',
+    'ABL Islamic Cash Fund',
+    'ABL Islamic Financial Planning Fund (Active Allocation Plan)',
+    'ABL Islamic Financial Planning Fund (Capital Preservation Plan I)',
+    'ABL Islamic Financial Planning Fund (Conservative Allocation Plan)',
+    'ABL Islamic Income Fund',
+    'ABL Islamic Money Market Plan I',
+    'ABL Islamic Sovereign Plan I',
+    'ABL Islamic Stock Fund',
+    'ABL Money Market Plan I',
+    'ABL Optimal Asset Allocation Fund',
+    'ABL Special Saving Fund (ABL Special Saving Plan I)',
+    'ABL Special Saving Fund (ABL Special Saving Plan II)',
+    'ABL Special Saving Fund (ABL Special Saving Plan III)',
+    'ABL Special Saving Fund (ABL Special Saving Plan IV)',
+    'ABL Special Saving Fund (ABL Special Saving Plan V)',
+    'ABL Special Saving Fund (ABL Special Saving Plan VI)',
+    'ABL Stock Fund',
+    'Allied Finergy Fund'
   ],
   'Alfalah Asset Management Limited': [
-    'Alfalah GHP Stock Fund', 'Alfalah GHP Value Fund', 'Alfalah GHP Cash Fund',
-    'Alfalah GHP Income Fund', 'Alfalah GHP Money Market Fund', 'Alfalah GHP Alpha Fund',
-    'Alfalah GHP Islamic Stock Fund', 'Alfalah GHP Islamic Income Fund',
-    'Alfalah GHP Islamic Cash Fund', 'Alfalah GHP Islamic Asset Allocation Fund'
+    'Alfalah Asset Allocation Fund',
+    'Alfalah Cash Fund - II',
+    'Alfalah Financial Sector Income Fund',
+    'Alfalah Financial Sector Opportunity Fund',
+    'Alfalah Financial Value Fund - II',
+    'Alfalah Financial Value Fund (Alfalah Financial Value Plan I)',
+    'Alfalah GHP Alpha Fund',
+    'Alfalah GHP Cash Fund',
+    'Alfalah GHP Income Fund',
+    'Alfalah GHP Income Multiplier Fund',
+    'Alfalah GHP Islamic Income Fund',
+    'Alfalah GHP Islamic Prosperity Planning Fund (Alfalah GHP Islamic Active Allocation Plan II)',
+    'Alfalah GHP Islamic Prosperity Planning Fund (Alfalah GHP Islamic Balance Allocation Plan)',
+    'Alfalah GHP Islamic Prosperity Planning Fund (Alfalah GHP Islamic Moderate Allocation Plan)',
+    'Alfalah GHP Islamic Stock Fund',
+    'Alfalah GHP Islamic Value Fund',
+    'Alfalah GHP Money Market Fund',
+    'Alfalah GHP Prosperity Planning Fund (Alfalah GHP Active Allocation Plan)',
+    'Alfalah GHP Prosperity Planning Fund (Alfalah GHP Conservative Allocation Plan)',
+    'Alfalah GHP Prosperity Planning Fund (Alfalah GHP Moderate Allocation Plan)',
+    'Alfalah GHP Sovereign Fund',
+    'Alfalah GHP Stock Fund',
+    'Alfalah GHP Value Fund',
+    'Alfalah Government Securities Fund - II',
+    'Alfalah Government Securities Fund Plan I',
+    'Alfalah Government Securities Fund Plan II',
+    'Alfalah Income & Growth Fund',
+    'Alfalah Islamic Amdani Fund',
+    'Alfalah Islamic Asset Allocation Fund Plan I',
+    'Alfalah Islamic Income Growth Fund',
+    'Alfalah Islamic Money Market Fund',
+    'Alfalah Islamic Sovereign Fund (Alfalah Islamic Sovereign Plan I)',
+    'Alfalah Islamic Sovereign Fund (Alfalah Islamic Sovereign Plan II)',
+    'Alfalah Islamic Sovereign Fund (Alfalah Islamic Sovereign Plan III)',
+    'Alfalah Islamic Stable Return Fund Plan XIX',
+    'Alfalah KTrade Islamic Plan VII',
+    'Alfalah Money Market Fund - II',
+    'Alfalah MTS Fund',
+    'Alfalah Savings Growth Fund',
+    'Alfalah Special Savings Fund - I',
+    'Alfalah Special Savings Fund - II',
+    'Alfalah Stable Return Fund Plan XX',
+    'Alfalah Stable Return Fund Plan XXVI',
+    'Alfalah Stable Return Fund Plan XXVII',
+    'Alfalah Stable Return Fund Plan XXVIII',
+    'Alfalah Stable Return Fund Plan XXX',
+    'Alfalah Stable Return Fund Plan XXXI',
+    'Alfalah Stable Return Fund Plan XXXII',
+    'Alfalah Stable Return Fund Plan XXXIII',
+    'Alfalah Stock Fund - II',
+    'Alfalah Strategic Allocation Capital Preservation Plan II',
+    'Alfalah Strategic Allocation Capital Preservation Plan III',
+    'Alfalah Strategic Allocation Fund Plan - I'
   ],
+  // Verified against MUFAP's own daily NAV list (2026-09-24) - every one of these is a
+  // distinct, currently-active fund/plan with its own NAV, not a stale/renamed duplicate.
+  // Faysal's conventional (non-Islamic) funds from the old version of this list - Faysal
+  // Stock Fund, Faysal MTS Fund, Faysal Money Market Fund, Faysal Income & Growth Fund,
+  // Faysal Asset Allocation Fund, plain Faysal Savings Growth Fund - no longer appear on
+  // MUFAP at all, consistent with the AMC having since converted its lineup to
+  // Shariah-compliant only.
   'Faysal Asset Management Limited': [
-    'Faysal Stock Fund', 'Faysal MTS Fund', 'Faysal Savings Growth Fund',
-    'Faysal Money Market Fund', 'Faysal Income & Growth Fund', 'Faysal Asset Allocation Fund',
-    'Faysal Islamic Stock Fund', 'Faysal Islamic Savings Growth Fund', 'Faysal Islamic Cash Fund'
+    'Faysal Halal Amdani Fund', 'Faysal Halal Amdani Fund II', 'Faysal Halal Amdani Fund III',
+    'Faysal Islamic Asset Allocation Fund', 'Faysal Islamic Asset Allocation Fund II',
+    'Faysal Islamic Asset Allocation Fund III (Faysal Shariah Flex Plan I)',
+    'Faysal Islamic Asset Allocation Fund III (Faysal Shariah Flex Plan II)',
+    'Faysal Islamic Asset Allocation Fund III (Faysal Shariah Flex Plan III)',
+    'Faysal Islamic Asset Allocation Fund IV (Faysal Shariah Flex Plan IV)',
+    'Faysal Islamic Asset Allocation Fund IV (Faysal Shariah Flex Plan V)',
+    'Faysal Islamic Asset Allocation Fund IV (Faysal Shariah Flex Plan VI)',
+    'Faysal Islamic Cash Fund',
+    'Faysal Islamic Financial Growth Fund (Faysal Islamic Financial Growth Plan I)',
+    'Faysal Islamic Financial Growth Fund (Faysal Islamic Financial Growth Plan II)',
+    'Faysal Islamic Financial Growth Fund II',
+    'Faysal Islamic Financial Planning Fund II (Faysal Priority Ascend Plan I)',
+    'Faysal Islamic Financial Planning Fund II (Faysal Priority Ascend Plan II)',
+    'Faysal Islamic Financial Planning Fund II (Faysal Priority Ascend Plan III)',
+    'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXI)',
+    'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXV)',
+    'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXVI)',
+    'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXXII)',
+    'Faysal Islamic Savings Growth Fund',
+    'Faysal Islamic Sovereign Fund (Faysal Islamic Sovereign Plan I)',
+    'Faysal Islamic Sovereign Fund (Faysal Islamic Sovereign Plan II)',
+    'Faysal Islamic Special Income Plan I',
+    'Faysal Islamic Stock Fund', 'Faysal Islamic Stock Fund II',
+    'Faysal Khushal Mustaqbil Fund (Faysal Barak’ah Women Savers Plan)',
+    'Faysal Khushal Mustaqbil Fund (Faysal Nu’umah Women Savers Plan)'
   ],
   'Atlas Asset Management Limited': [
-    'Atlas Stock Market Fund', 'Atlas Money Market Fund', 'Atlas Income Fund',
-    'Atlas Pension Fund', 'Atlas Islamic Stock Fund', 'Atlas Islamic Income Fund',
-    'Atlas Islamic Money Market Fund'
+    'Atlas Dividend Yield Fund',
+    'Atlas Financial Sector Fund',
+    'Atlas Income Fund',
+    'Atlas Islamic Building Materials Fund',
+    'Atlas Islamic Cash Fund',
+    'Atlas Islamic Energy Fund',
+    'Atlas Islamic Fund of Funds (Atlas Aggressive Allocation Islamic Plan)',
+    'Atlas Islamic Fund of Funds (Atlas Conservative Allocation Islamic Plan)',
+    'Atlas Islamic Fund of Funds (Atlas Moderate Allocation Islamic Plan)',
+    'Atlas Islamic Income Fund',
+    'Atlas Islamic Money Market Fund',
+    'Atlas Islamic Stock Fund',
+    'Atlas Liquid Fund',
+    'Atlas Money Market Fund',
+    'Atlas Sovereign Fund',
+    'Atlas Stock Market Fund'
   ],
   'JS Investments Limited': [
-    'JS Growth Fund', 'JS Value Fund', 'JS Large Cap Fund', 'JS Cash Fund', 'JS Income Fund',
-    'JS Islamic Fund', 'JS Islamic Income Fund', 'JS Islamic Dedicated Equity Fund'
+    'JS Cash Fund',
+    'JS Fixed Term Munafa Fund (JS Fixed Term Munafa Plan I)',
+    'JS Fixed Term Munafa Fund (JS Fixed Term Munafa Plan XX)',
+    'JS Fixed Term Munafa Fund II (JS Fixed Term Munafa Plan VI)',
+    'JS Fixed Term Munafa Fund II (JS Fixed Term Munafa Plan VII)',
+    'JS Fixed Term Munafa Fund Plan 23',
+    'JS Fixed Term Munafa Fund Plan 24',
+    'JS Fund of Funds',
+    'JS Government Securities Fund',
+    'JS Growth Fund',
+    'JS Income Fund',
+    'JS Islamic Fund',
+    'JS Islamic Income Fund',
+    'JS Islamic Money Market Fund',
+    'JS Islamic Sarmaya Mehfooz Fund (JS Islamic Sarmaya Mehfooz Plan 1)',
+    'JS Islamic Sarmaya Mehfooz Fund Plan 2 2020',
+    'JS Large Cap Fund',
+    'JS Microfinance Sector Fund',
+    'JS Money Market Fund',
+    'Unit Trust of Pakistan'
   ],
   'National Investment Trust Limited': [
-    'NI(U)T Fund', 'NIT State Enterprise Fund', 'NIT Government Bond Fund', 'NIT Income Fund',
-    'NIT Money Market Fund', 'NIT Islamic Equity Fund', 'NIT Islamic Money Market Fund'
+    'National Investment Unit Trust',
+    'NIT - Government Bond Fund',
+    'NIT - Income Fund',
+    'NIT Asset Allocation Fund',
+    'NIT Islamic Equity Fund',
+    'NIT Islamic Income Fund',
+    'NIT Islamic Money Market Fund',
+    'NIT Money Market Fund',
+    'NIT Social Impact Fund'
   ]
 };
 
 // Flat fund-name -> category lookup (MUFAP-style classification), keyed to exactly the
 // fund names in AMC_FUNDS above. Drives the auto-fill in onFundNamePickerChange() - picking
 // a known fund fills Category for you; picking "Other" leaves it blank for manual entry,
-// same escape hatch as the AMC/Fund pickers themselves.
-const FUND_CATEGORY = {
-  'Meezan Islamic Fund': 'Islamic Equity', 'Al Meezan Mutual Fund': 'Islamic Equity',
-  'Meezan Balanced Fund': 'Islamic Balanced', 'Meezan Islamic Income Fund': 'Islamic Income',
-  'Meezan Cash Fund': 'Islamic Money Market', 'Meezan Sovereign Fund': 'Islamic Income',
-  'KSE Meezan Index Fund': 'Islamic Index Fund', 'Meezan Asset Allocation Fund': 'Islamic Asset Allocation',
-  'Meezan Energy Fund': 'Islamic Equity', 'Meezan Rozana Amdani Fund': 'Islamic Money Market',
-  'Meezan Gold Fund': 'Shariah Compliant Commodity', 'Meezan Dedicated Equity Fund': 'Islamic Equity',
+// same escape hatch as the AMC/Fund pickers themselves. `let`, not `const` - see AMC_FUNDS.
+let FUND_CATEGORY = {
+  // Al Meezan Investment Management Limited
+  'Al Meezan Mutual Fund': 'Islamic Equity',
+  'KSE Meezan Index Fund': 'Islamic Index Tracker',
+  'Meezan Asset Allocation Fund': 'Islamic Asset Allocation',
+  'Meezan Balanced Fund': 'Islamic Balanced',
+  'Meezan Capital Protected Fund III (Meezan Capital Secure Plan I)': 'Islamic Capital Protected',
+  'Meezan Cash Fund': 'Islamic Money Market',
+  'Meezan Daily Income Fund (MDIP I)': 'Islamic Income',
+  'Meezan Daily Income Fund (Meezan Mahana Munafa Plan)': 'Islamic Income',
+  'Meezan Daily Income Fund (Meezan Munafa Plan I)': 'Islamic Income',
+  'Meezan Daily Income Fund (Meezan Sehl Account Plan) (MSHP)': 'Islamic Income',
+  'Meezan Daily Income Fund (Meezan Super Saver Plan) (MSSP)': 'Islamic Income',
+  'Meezan Dynamic Asset Allocation Fund (Meezan Dividend Yield Plan)': 'Islamic Asset Allocation',
+  'Meezan Energy Fund': 'Islamic Equity',
+  'Meezan Financial Planning Fund of Funds (Aggressive)': 'Islamic Fund of Funds',
+  'Meezan Financial Planning Fund of Funds (Conservative)': 'Islamic Fund of Funds',
+  'Meezan Financial Planning Fund of Funds (MAAP I)': 'Islamic Fund of Funds',
+  'Meezan Financial Planning Fund of Funds (Moderate)': 'Islamic Fund of Funds',
+  'Meezan Financial Planning Fund of Funds (Very Conservative Allocation Plan)': 'Islamic Fund of Funds',
+  'Meezan Gold Fund': 'Islamic Commodities',
+  'Meezan Government Securities Fund Plan I': 'Islamic Income',
+  'Meezan Islamic Asaan Cash Fund': 'Islamic Money Market',
+  'Meezan Islamic Fund': 'Islamic Equity',
+  'Meezan Islamic Income Fund': 'Islamic Income',
+  'Meezan Paidaar Munafa Plan 34': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 39': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 43': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 47': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 48': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 49': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 50': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 52': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 53': 'Islamic Fixed Rate / Return',
+  'Meezan Paidaar Munafa Plan 54': 'Islamic Fixed Rate / Return',
+  'Meezan Rozana Amdani Fund': 'Islamic Money Market',
+  'Meezan Sovereign Fund': 'Islamic Income',
+  'Meezan Strategic Allocation Fund (MSAP I)': 'Islamic Fund of Funds',
+  'Meezan Strategic Allocation Fund (MSAP II)': 'Islamic Fund of Funds',
+  'Meezan Strategic Allocation Fund (MSAP III)': 'Islamic Fund of Funds',
+  'Meezan Strategic Allocation Fund (MSAP IV)': 'Islamic Fund of Funds',
+  'Meezan Strategic Allocation Fund (MSAP V)': 'Islamic Fund of Funds',
 
-  'NBP Stock Fund': 'Equity', 'NBP Money Market Fund': 'Money Market', 'NBP Savings Fund': 'Income',
-  'NBP Income Opportunity Fund': 'Income', 'NBP Sarmaya Izafa Fund': 'Asset Allocation',
-  'NBP Balanced Fund': 'Balanced', 'NBP Financial Sector Fund': 'Equity',
-  'NBP Government Securities Savings Fund': 'Income', 'NBP Islamic Stock Fund': 'Islamic Equity',
-  'NBP Islamic Money Market Fund': 'Islamic Money Market', 'NBP Islamic Savings Fund': 'Islamic Income',
-  'NBP Islamic Sarmaya Izafa Fund': 'Islamic Asset Allocation', 'NBP Islamic Energy Fund': 'Islamic Equity',
-  'NBP Pakistan Growth Exchange Traded Fund': 'ETF',
+  // NBP Fund Management Limited
+  'NBP Balanced Fund': 'Balanced',
+  'NBP Cash Plan I': 'Money Market',
+  'NBP Cash Plan II': 'Money Market',
+  'NBP Financial Sector Fund': 'Equity',
+  'NBP Financial Sector Income Fund': 'Income',
+  'NBP Financial Sector Income Plus Fund': 'Income',
+  'NBP Fixed Term Munafa Plan VIB (NBP Mustahkam Fund I)': 'Fixed Rate / Return',
+  'NBP Fixed Term Munafa Plan VIIB (NBP Mustahkam Fund I)': 'Fixed Rate / Return',
+  'NBP Fixed Term Munafa Plan XIIB (NBP Mustahkam Fund II)': 'Fixed Rate / Return',
+  'NBP Fixed Term Munafa Plan XIII (NBP Mustahkam Fund II)': 'Fixed Rate / Return',
+  'NBP Fixed Term Munafa Plan XIIIB (NBP Mustahkam Fund II)': 'Fixed Rate / Return',
+  'NBP Fixed Term Munafa Plan XIVB': 'Fixed Rate / Return',
+  'NBP Fixed Term Munafa Plan XXA (NBP Mustahkam Fund II)': 'Fixed Rate / Return',
+  'NBP Government Securities Liquid Fund': 'Money Market',
+  'NBP Government Securities Plan IV': 'Income',
+  'NBP Government Securities Savings Fund': 'Income',
+  'NBP Income Opportunity Fund': 'Income',
+  'NBP Income Plan I': 'Income',
+  'NBP Islamic Daily Dividend Fund': 'Islamic Money Market',
+  'NBP Islamic Energy Fund': 'Islamic Equity',
+  'NBP Islamic Fixed Term Munafa Plan IIB (NBP Islamic Mustahkam Fund)': 'Islamic Fixed Rate / Return',
+  'NBP Islamic Fixed Term Munafa Plan VIB (NBP Islamic Mustahkam Fund)': 'Islamic Fixed Rate / Return',
+  'NBP Islamic Gold Fund': 'Islamic Commodities',
+  'NBP Islamic Government Securities Plan III': 'Islamic Income',
+  'NBP Islamic Income Fund': 'Islamic Income',
+  'NBP Islamic Mahana Amdani Fund': 'Islamic Income',
+  'NBP Islamic Money Market Fund': 'Islamic Money Market',
+  'NBP Islamic Money Market Liquid Fund': 'Islamic Money Market',
+  'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan I)': 'Islamic Capital Protected',
+  'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan II)': 'Islamic Capital Protected',
+  'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan III)': 'Islamic Capital Protected',
+  'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan IV)': 'Islamic Capital Protected',
+  'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan V)': 'Islamic Capital Protected',
+  'NBP Islamic Principal Protection Fund I (NBP Islamic Principal Protection Plan VI)': 'Islamic Capital Protected',
+  'NBP Islamic Sarmaya Izafa Fund': 'Islamic Asset Allocation',
+  'NBP Islamic Savings Fund': 'Islamic Income',
+  'NBP Islamic Stock Fund': 'Islamic Equity',
+  'NBP Mahana Amdani Fund': 'Income',
+  'NBP Money Market Fund': 'Money Market',
+  'NBP Money Market Liquid Fund': 'Money Market',
+  'NBP Riba Free Savings Fund': 'Islamic Income',
+  'NBP Sarmaya Izafa Fund': 'Asset Allocation',
+  'NBP Savings Fund': 'Income',
+  'NBP Savings Plus Fund': 'Income',
+  'NBP Stock Fund': 'Equity',
 
-  'UBL Stock Advantage Fund': 'Equity', 'UBL Money Market Fund': 'Money Market',
-  'UBL Liquidity Plus Fund': 'Money Market', 'UBL Growth and Income Fund': 'Balanced',
-  'UBL Retirement Savings Fund': 'Pension', 'UBL Government Securities Fund': 'Income',
-  'Al-Ameen Shariah Stock Fund': 'Islamic Equity', 'Al-Ameen Islamic Cash Fund': 'Islamic Money Market',
-  'Al-Ameen Islamic Sovereign Fund': 'Islamic Income', 'Al-Ameen Islamic Aggressive Income Fund': 'Islamic Income',
-  'Al-Ameen Islamic Dedicated Equity Fund': 'Islamic Equity', 'Al-Ameen Islamic Retirement Savings Fund': 'Islamic Pension',
-  'Al-Ameen Islamic Asset Allocation Fund': 'Islamic Asset Allocation', 'Al-Ameen Islamic Energy Fund': 'Islamic Equity',
+  // UBL Fund Managers Limited
+  'Al Ameen Islamic Aggressive Income Fund': 'Islamic Aggressive Fixed Income',
+  'Al Ameen Islamic Aggressive Income Plan I': 'Islamic Aggressive Fixed Income',
+  'Al Ameen Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  'Al Ameen Islamic Cash Fund': 'Islamic Money Market',
+  'Al Ameen Islamic Cash Plan I': 'Islamic Money Market',
+  'Al Ameen Islamic Energy Fund': 'Islamic Equity',
+  'Al Ameen Islamic Income Fund': 'Islamic Income',
+  'Al Ameen Islamic Sovereign Fund': 'Islamic Income',
+  'Al Ameen Shariah Stock Fund': 'Islamic Equity',
+  'UBL Asset Allocation Fund': 'Asset Allocation',
+  'UBL Cash Fund': 'Money Market',
+  'UBL Financial Sector Fund': 'Equity',
+  'UBL Fixed Return Plan III (Y)': 'Fixed Rate / Return',
+  'UBL Fixed Return Plan III (Z)': 'Fixed Rate / Return',
+  'UBL Government Securities Fund': 'Income',
+  'UBL Growth & Income Fund': 'Aggressive Fixed Income',
+  'UBL Income Opportunity Fund': 'Income',
+  'UBL Liquidity Fund': 'Money Market',
+  'UBL Liquidity Plus Fund': 'Money Market',
+  'UBL Money Market Fund': 'Money Market',
+  'UBL Special Savings Plan X': 'Capital Protected - Income',
+  'UBL Stock Advantage Fund': 'Equity',
 
-  'HBL Stock Fund': 'Equity', 'HBL Equity Fund': 'Equity', 'HBL Growth Fund': 'Equity',
-  'HBL Money Market Fund': 'Money Market', 'HBL Cash Fund': 'Money Market', 'HBL Income Fund': 'Income',
-  'HBL Government Securities Fund': 'Income', 'HBL Financial Sector Income Fund': 'Income',
-  'HBL Multi Asset Fund': 'Balanced', 'HBL Islamic Stock Fund': 'Islamic Equity',
-  'HBL Islamic Equity Fund': 'Islamic Equity', 'HBL Islamic Money Market Fund': 'Islamic Money Market',
-  'HBL Islamic Income Fund': 'Islamic Income', 'HBL Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
-  'HBL Islamic Dedicated Equity Fund': 'Islamic Equity',
+  // HBL Asset Management Limited
+  'HBL Cash Fund': 'Money Market',
+  'HBL Energy Fund': 'Equity',
+  'HBL Equity Fund': 'Equity',
+  'HBL Financial Sector Income Fund Plan I': 'Income',
+  'HBL Financial Sector Income Fund Plan II': 'Income',
+  'HBL Government Securities Fund': 'Income',
+  'HBL Growth Fund-Class A': 'Equity',
+  'HBL Growth Fund-Class B': 'Equity',
+  'HBL Income Fund': 'Income',
+  'HBL Investment Fund-Class A': 'Equity',
+  'HBL Investment Fund-Class B': 'Equity',
+  'HBL Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  'HBL Islamic Equity Fund': 'Islamic Equity',
+  'HBL Islamic Fixed Term Fund Plan 11': 'Islamic Fixed Rate / Return',
+  'HBL Islamic Fixed Term Fund Plan 12': 'Islamic Fixed Rate / Return',
+  'HBL Islamic Income Fund': 'Islamic Income',
+  'HBL Islamic Money Market Fund': 'Islamic Money Market',
+  'HBL Islamic Regular Income Fund': 'Islamic Income',
+  'HBL Islamic Savings Plan I': 'Islamic Money Market',
+  'HBL Islamic Stock Fund': 'Islamic Equity',
+  'HBL Mehfooz Munafa Fund Plan XI': 'Fixed Rate / Return',
+  'HBL Mehfooz Munafa Fund Plan XIV': 'Fixed Rate / Return',
+  'HBL Mehfooz Munafa Fund Plan XVIII': 'Fixed Rate / Return',
+  'HBL Money Market Fund': 'Money Market',
+  'HBL Multi Asset Fund': 'Balanced',
+  'HBL Regular Income Fund': 'Income',
+  'HBL Stock Fund': 'Equity',
 
-  'MCB Pakistan Stock Market Fund': 'Equity', 'MCB Cash Management Optimizer': 'Money Market',
-  'MCB Pakistan Asset Allocation Fund': 'Asset Allocation', 'MCB Pakistan Sovereign Fund': 'Income',
-  'MCB Pakistan Income Fund': 'Income', 'MCB Pakistan Frequent Payout Fund': 'Asset Allocation',
-  'Alhamra Islamic Stock Fund': 'Islamic Equity', 'Alhamra Islamic Income Fund': 'Islamic Income',
-  'Alhamra Islamic Money Market Fund': 'Islamic Money Market', 'Alhamra Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  // MCB Investment Management Limited
+  'Alhamra Cash Management Optimizer': 'Islamic Money Market',
+  'Alhamra Daily Dividend Fund': 'Islamic Income',
+  'Alhamra Government Securities Plan I': 'Islamic Income',
+  'Alhamra Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  'Alhamra Islamic Cash Fund': 'Islamic Money Market',
+  'Alhamra Islamic Energy Fund': 'Islamic Equity',
+  'Alhamra Islamic Income Fund': 'Islamic Income',
+  'Alhamra Islamic Investment Savings Fund': 'Islamic Income',
+  'Alhamra Islamic Money Market Fund': 'Islamic Money Market',
+  'Alhamra Islamic Stock Fund': 'Islamic Equity',
+  'Alhamra Opportunity Fund (Dividend Strategy Plan)': 'Islamic Equity',
+  'Alhamra Smart Portfolio': 'Islamic Fund of Funds',
+  'Alhamra Wada Plan XXII': 'Islamic Fixed Rate / Return',
+  'MCB Cash Management Optimizer': 'Money Market',
+  'MCB DCF Fixed Return Plan XI': 'Fixed Rate / Return',
+  'MCB DCF Fixed Return Plan XII': 'Fixed Rate / Return',
+  'MCB DCF Fixed Return Plan XIII': 'Fixed Rate / Return',
+  'MCB DCF Fixed Return Plan XIV': 'Fixed Rate / Return',
+  'MCB DCF Income Fund': 'Income',
+  'MCB Financial Sector Fund': 'Equity',
+  'MCB Government Securities Plan I': 'Income',
+  'MCB Investment Savings Plan I': 'Aggressive Fixed Income',
+  'MCB Money Market Fund': 'Money Market',
+  'MCB Pakistan Asset Allocation Fund': 'Asset Allocation',
+  'MCB Pakistan Opportunity Fund (MCB Pakistan Dividend Yield Plan)': 'Asset Allocation',
+  'MCB Pakistan Sovereign Fund': 'Income',
+  'MCB Pakistan Stock Market Fund': 'Equity',
+  'Pakistan Capital Market Fund': 'Balanced',
+  'Pakistan Cash Management Fund': 'Money Market',
+  'Pakistan Income Enhancement Fund': 'Aggressive Fixed Income',
+  'Pakistan Income Fund': 'Income',
 
-  'ABL Stock Fund': 'Equity', 'ABL Cash Fund': 'Money Market', 'ABL Income Fund': 'Income',
-  'ABL Government Securities Fund': 'Income', 'ABL Financial Planning Fund': 'Fund of Funds',
-  'ABL Islamic Stock Fund': 'Islamic Equity', 'ABL Islamic Cash Fund': 'Islamic Money Market',
-  'ABL Islamic Income Fund': 'Islamic Income', 'ABL Islamic Dedicated Stock Fund': 'Islamic Equity',
-  'ABL Islamic Financial Planning Fund': 'Islamic Fund of Funds',
+  // ABL Asset Management Company Limited
+  'ABL Cash Fund': 'Money Market',
+  'ABL Financial Sector Fund Plan I': 'Income',
+  'ABL Fixed Rate Plan XXIX': 'Fixed Rate / Return',
+  'ABL Fixed Rate Plan XXVII': 'Fixed Rate / Return',
+  'ABL Fixed Rate Plan XXVIII': 'Fixed Rate / Return',
+  'ABL Fixed Rate Plan XXX': 'Fixed Rate / Return',
+  'ABL Fixed Rate Plan XXXI': 'Fixed Rate / Return',
+  'ABL Government Securities Fund': 'Income',
+  'ABL Income Fund': 'Income',
+  'ABL Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  'ABL Islamic Cash Fund': 'Islamic Money Market',
+  'ABL Islamic Financial Planning Fund (Active Allocation Plan)': 'Islamic Fund of Funds',
+  'ABL Islamic Financial Planning Fund (Capital Preservation Plan I)': 'Islamic Fund of Funds - CPPI',
+  'ABL Islamic Financial Planning Fund (Conservative Allocation Plan)': 'Islamic Fund of Funds',
+  'ABL Islamic Income Fund': 'Islamic Income',
+  'ABL Islamic Money Market Plan I': 'Islamic Money Market',
+  'ABL Islamic Sovereign Plan I': 'Islamic Income',
+  'ABL Islamic Stock Fund': 'Islamic Equity',
+  'ABL Money Market Plan I': 'Money Market',
+  'ABL Optimal Asset Allocation Fund': 'Asset Allocation',
+  'ABL Special Saving Fund (ABL Special Saving Plan I)': 'Capital Protected',
+  'ABL Special Saving Fund (ABL Special Saving Plan II)': 'Capital Protected',
+  'ABL Special Saving Fund (ABL Special Saving Plan III)': 'Capital Protected',
+  'ABL Special Saving Fund (ABL Special Saving Plan IV)': 'Capital Protected',
+  'ABL Special Saving Fund (ABL Special Saving Plan V)': 'Capital Protected',
+  'ABL Special Saving Fund (ABL Special Saving Plan VI)': 'Capital Protected',
+  'ABL Stock Fund': 'Equity',
+  'Allied Finergy Fund': 'Asset Allocation',
 
-  'Alfalah GHP Stock Fund': 'Equity', 'Alfalah GHP Value Fund': 'Equity', 'Alfalah GHP Cash Fund': 'Money Market',
-  'Alfalah GHP Income Fund': 'Income', 'Alfalah GHP Money Market Fund': 'Money Market',
-  'Alfalah GHP Alpha Fund': 'Equity', 'Alfalah GHP Islamic Stock Fund': 'Islamic Equity',
-  'Alfalah GHP Islamic Income Fund': 'Islamic Income', 'Alfalah GHP Islamic Cash Fund': 'Islamic Money Market',
-  'Alfalah GHP Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  // Alfalah Asset Management Limited
+  'Alfalah Asset Allocation Fund': 'Asset Allocation',
+  'Alfalah Cash Fund - II': 'Money Market',
+  'Alfalah Financial Sector Income Fund': 'Income',
+  'Alfalah Financial Sector Opportunity Fund': 'Income',
+  'Alfalah Financial Value Fund - II': 'Asset Allocation',
+  'Alfalah Financial Value Fund (Alfalah Financial Value Plan I)': 'Asset Allocation',
+  'Alfalah GHP Alpha Fund': 'Equity',
+  'Alfalah GHP Cash Fund': 'Money Market',
+  'Alfalah GHP Income Fund': 'Income',
+  'Alfalah GHP Income Multiplier Fund': 'Aggressive Fixed Income',
+  'Alfalah GHP Islamic Income Fund': 'Islamic Income',
+  'Alfalah GHP Islamic Prosperity Planning Fund (Alfalah GHP Islamic Active Allocation Plan II)': 'Islamic Fund of Funds',
+  'Alfalah GHP Islamic Prosperity Planning Fund (Alfalah GHP Islamic Balance Allocation Plan)': 'Islamic Fund of Funds',
+  'Alfalah GHP Islamic Prosperity Planning Fund (Alfalah GHP Islamic Moderate Allocation Plan)': 'Islamic Fund of Funds',
+  'Alfalah GHP Islamic Stock Fund': 'Islamic Equity',
+  'Alfalah GHP Islamic Value Fund': 'Islamic Asset Allocation',
+  'Alfalah GHP Money Market Fund': 'Money Market',
+  'Alfalah GHP Prosperity Planning Fund (Alfalah GHP Active Allocation Plan)': 'Fund of Funds',
+  'Alfalah GHP Prosperity Planning Fund (Alfalah GHP Conservative Allocation Plan)': 'Fund of Funds',
+  'Alfalah GHP Prosperity Planning Fund (Alfalah GHP Moderate Allocation Plan)': 'Fund of Funds',
+  'Alfalah GHP Sovereign Fund': 'Income',
+  'Alfalah GHP Stock Fund': 'Equity',
+  'Alfalah GHP Value Fund': 'Asset Allocation',
+  'Alfalah Government Securities Fund - II': 'Income',
+  'Alfalah Government Securities Fund Plan I': 'Income',
+  'Alfalah Government Securities Fund Plan II': 'Income',
+  'Alfalah Income & Growth Fund': 'Aggressive Fixed Income',
+  'Alfalah Islamic Amdani Fund': 'Islamic Money Market',
+  'Alfalah Islamic Asset Allocation Fund Plan I': 'Islamic Asset Allocation',
+  'Alfalah Islamic Income Growth Fund': 'Islamic Aggressive Fixed Income',
+  'Alfalah Islamic Money Market Fund': 'Islamic Money Market',
+  'Alfalah Islamic Sovereign Fund (Alfalah Islamic Sovereign Plan I)': 'Islamic Income',
+  'Alfalah Islamic Sovereign Fund (Alfalah Islamic Sovereign Plan II)': 'Islamic Income',
+  'Alfalah Islamic Sovereign Fund (Alfalah Islamic Sovereign Plan III)': 'Islamic Income',
+  'Alfalah Islamic Stable Return Fund Plan XIX': 'Islamic Fixed Rate / Return',
+  'Alfalah KTrade Islamic Plan VII': 'Islamic Fund of Funds',
+  'Alfalah Money Market Fund - II': 'Money Market',
+  'Alfalah MTS Fund': 'Income',
+  'Alfalah Savings Growth Fund': 'Income',
+  'Alfalah Special Savings Fund - I': 'Capital Protected',
+  'Alfalah Special Savings Fund - II': 'Capital Protected',
+  'Alfalah Stable Return Fund Plan XX': 'Fixed Rate / Return',
+  'Alfalah Stable Return Fund Plan XXVI': 'Fixed Rate / Return',
+  'Alfalah Stable Return Fund Plan XXVII': 'Fixed Rate / Return',
+  'Alfalah Stable Return Fund Plan XXVIII': 'Fixed Rate / Return',
+  'Alfalah Stable Return Fund Plan XXX': 'Fixed Rate / Return',
+  'Alfalah Stable Return Fund Plan XXXI': 'Fixed Rate / Return',
+  'Alfalah Stable Return Fund Plan XXXII': 'Fixed Rate / Return',
+  'Alfalah Stable Return Fund Plan XXXIII': 'Fixed Rate / Return',
+  'Alfalah Stock Fund - II': 'Equity',
+  'Alfalah Strategic Allocation Capital Preservation Plan II': 'Fund of Funds',
+  'Alfalah Strategic Allocation Capital Preservation Plan III': 'Fund of Funds',
+  'Alfalah Strategic Allocation Fund Plan - I': 'Fund of Funds',
 
-  'Faysal Stock Fund': 'Equity', 'Faysal MTS Fund': 'Income', 'Faysal Savings Growth Fund': 'Income',
-  'Faysal Money Market Fund': 'Money Market', 'Faysal Income & Growth Fund': 'Income',
-  'Faysal Asset Allocation Fund': 'Asset Allocation', 'Faysal Islamic Stock Fund': 'Islamic Equity',
-  'Faysal Islamic Savings Growth Fund': 'Islamic Income', 'Faysal Islamic Cash Fund': 'Islamic Money Market',
+  // Faysal Asset Management Limited
+  'Faysal Halal Amdani Fund': 'Islamic Money Market',
+  'Faysal Halal Amdani Fund II': 'Islamic Income', 'Faysal Halal Amdani Fund III': 'Islamic Income',
+  'Faysal Islamic Asset Allocation Fund': 'Islamic Asset Allocation',
+  'Faysal Islamic Asset Allocation Fund II': 'Islamic Asset Allocation',
+  'Faysal Islamic Asset Allocation Fund III (Faysal Shariah Flex Plan I)': 'Islamic Asset Allocation',
+  'Faysal Islamic Asset Allocation Fund III (Faysal Shariah Flex Plan II)': 'Islamic Asset Allocation',
+  'Faysal Islamic Asset Allocation Fund III (Faysal Shariah Flex Plan III)': 'Islamic Asset Allocation',
+  'Faysal Islamic Asset Allocation Fund IV (Faysal Shariah Flex Plan IV)': 'Islamic Asset Allocation',
+  'Faysal Islamic Asset Allocation Fund IV (Faysal Shariah Flex Plan V)': 'Islamic Asset Allocation',
+  'Faysal Islamic Asset Allocation Fund IV (Faysal Shariah Flex Plan VI)': 'Islamic Asset Allocation',
+  'Faysal Islamic Cash Fund': 'Islamic Money Market',
+  'Faysal Islamic Financial Growth Fund (Faysal Islamic Financial Growth Plan I)': 'Islamic Aggressive Fixed Income',
+  'Faysal Islamic Financial Growth Fund (Faysal Islamic Financial Growth Plan II)': 'Islamic Aggressive Fixed Income',
+  'Faysal Islamic Financial Growth Fund II': 'Islamic Aggressive Fixed Income',
+  'Faysal Islamic Financial Planning Fund II (Faysal Priority Ascend Plan I)': 'Islamic Fund of Funds',
+  'Faysal Islamic Financial Planning Fund II (Faysal Priority Ascend Plan II)': 'Islamic Fund of Funds',
+  'Faysal Islamic Financial Planning Fund II (Faysal Priority Ascend Plan III)': 'Islamic Fund of Funds',
+  'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXI)': 'Islamic Fixed Rate/Return',
+  'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXV)': 'Islamic Fixed Rate/Return',
+  'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXVI)': 'Islamic Fixed Rate/Return',
+  'Faysal Islamic Mustakil Munafa Fund (Faysal Islamic Mehdood Muddat Plan XXXII)': 'Islamic Fixed Rate/Return',
+  'Faysal Islamic Savings Growth Fund': 'Islamic Income',
+  'Faysal Islamic Sovereign Fund (Faysal Islamic Sovereign Plan I)': 'Islamic Income',
+  'Faysal Islamic Sovereign Fund (Faysal Islamic Sovereign Plan II)': 'Islamic Income',
+  'Faysal Islamic Special Income Plan I': 'Islamic Income',
+  'Faysal Islamic Stock Fund': 'Islamic Equity', 'Faysal Islamic Stock Fund II': 'Islamic Equity',
+  'Faysal Khushal Mustaqbil Fund (Faysal Barak’ah Women Savers Plan)': 'Islamic Fund of Funds',
+  'Faysal Khushal Mustaqbil Fund (Faysal Nu’umah Women Savers Plan)': 'Islamic Fund of Funds',
 
-  'Atlas Stock Market Fund': 'Equity', 'Atlas Money Market Fund': 'Money Market', 'Atlas Income Fund': 'Income',
-  'Atlas Pension Fund': 'Pension', 'Atlas Islamic Stock Fund': 'Islamic Equity',
-  'Atlas Islamic Income Fund': 'Islamic Income', 'Atlas Islamic Money Market Fund': 'Islamic Money Market',
+  // Atlas Asset Management Limited
+  'Atlas Dividend Yield Fund': 'Equity',
+  'Atlas Financial Sector Fund': 'Equity',
+  'Atlas Income Fund': 'Income',
+  'Atlas Islamic Building Materials Fund': 'Islamic Equity',
+  'Atlas Islamic Cash Fund': 'Islamic Money Market',
+  'Atlas Islamic Energy Fund': 'Islamic Equity',
+  'Atlas Islamic Fund of Funds (Atlas Aggressive Allocation Islamic Plan)': 'Islamic Fund of Funds',
+  'Atlas Islamic Fund of Funds (Atlas Conservative Allocation Islamic Plan)': 'Islamic Fund of Funds',
+  'Atlas Islamic Fund of Funds (Atlas Moderate Allocation Islamic Plan)': 'Islamic Fund of Funds',
+  'Atlas Islamic Income Fund': 'Islamic Income',
+  'Atlas Islamic Money Market Fund': 'Islamic Money Market',
+  'Atlas Islamic Stock Fund': 'Islamic Equity',
+  'Atlas Liquid Fund': 'Money Market',
+  'Atlas Money Market Fund': 'Money Market',
+  'Atlas Sovereign Fund': 'Income',
+  'Atlas Stock Market Fund': 'Equity',
 
-  'JS Growth Fund': 'Equity', 'JS Value Fund': 'Equity', 'JS Large Cap Fund': 'Equity',
-  'JS Cash Fund': 'Money Market', 'JS Income Fund': 'Income', 'JS Islamic Fund': 'Islamic Equity',
-  'JS Islamic Income Fund': 'Islamic Income', 'JS Islamic Dedicated Equity Fund': 'Islamic Equity',
+  // JS Investments Limited
+  'JS Cash Fund': 'Money Market',
+  'JS Fixed Term Munafa Fund (JS Fixed Term Munafa Plan I)': 'Fixed Rate / Return',
+  'JS Fixed Term Munafa Fund (JS Fixed Term Munafa Plan XX)': 'Fixed Rate / Return',
+  'JS Fixed Term Munafa Fund II (JS Fixed Term Munafa Plan VI)': 'Fixed Rate / Return',
+  'JS Fixed Term Munafa Fund II (JS Fixed Term Munafa Plan VII)': 'Fixed Rate / Return',
+  'JS Fixed Term Munafa Fund Plan 23': 'Fixed Rate / Return',
+  'JS Fixed Term Munafa Fund Plan 24': 'Fixed Rate / Return',
+  'JS Fund of Funds': 'Fund of Funds',
+  'JS Government Securities Fund': 'Income',
+  'JS Growth Fund': 'Equity',
+  'JS Income Fund': 'Income',
+  'JS Islamic Fund': 'Islamic Equity',
+  'JS Islamic Income Fund': 'Islamic Income',
+  'JS Islamic Money Market Fund': 'Islamic Money Market',
+  'JS Islamic Sarmaya Mehfooz Fund (JS Islamic Sarmaya Mehfooz Plan 1)': 'Islamic Capital Protected',
+  'JS Islamic Sarmaya Mehfooz Fund Plan 2 2020': 'Islamic Capital Protected',
+  'JS Large Cap Fund': 'Equity',
+  'JS Microfinance Sector Fund': 'Income',
+  'JS Money Market Fund': 'Money Market',
+  'Unit Trust of Pakistan': 'Balanced',
 
-  'NI(U)T Fund': 'Equity', 'NIT State Enterprise Fund': 'Equity', 'NIT Government Bond Fund': 'Income',
-  'NIT Income Fund': 'Income', 'NIT Money Market Fund': 'Money Market',
-  'NIT Islamic Equity Fund': 'Islamic Equity', 'NIT Islamic Money Market Fund': 'Islamic Money Market'
+  // National Investment Trust Limited
+  'National Investment Unit Trust': 'Equity',
+  'NIT - Government Bond Fund': 'Income',
+  'NIT - Income Fund': 'Income',
+  'NIT Asset Allocation Fund': 'Asset Allocation',
+  'NIT Islamic Equity Fund': 'Islamic Equity',
+  'NIT Islamic Income Fund': 'Islamic Income',
+  'NIT Islamic Money Market Fund': 'Islamic Money Market',
+  'NIT Money Market Fund': 'Money Market',
+  'NIT Social Impact Fund': 'Income'
 };
 
 // CDC Account Balance Report — Mr. SARFRAZ AHMED — 25/06/2026
@@ -4095,7 +4679,10 @@ async function fetchPsxSymbolList() {
   return null;
 }
 
-async function loadPsxSymbols() {
+// force: skips the cache-TTL early-return, used by the manual "Sync Stocks & Funds"
+// button in Settings so a user who knows PSX just listed something new isn't stuck
+// waiting for the cache to expire on its own.
+async function loadPsxSymbols(force = false) {
   // Instant, synchronous, zero-network baseline - a brand-new browser has no
   // localStorage cache yet, so without this the datalist stays empty until the live
   // fetch resolves (~2s through the CORS proxy, longer or failing outright if the
@@ -4106,7 +4693,7 @@ async function loadPsxSymbols() {
     const cached = JSON.parse(localStorage.getItem(SYMBOLS_CACHE_KEY) || 'null');
     if (cached && Array.isArray(cached.list) && cached.list.length > 0) {
       applySymbolList(cached.list);
-      if (Date.now() - cached.fetchedAt < SYMBOLS_CACHE_TTL) return;
+      if (!force && Date.now() - cached.fetchedAt < SYMBOLS_CACHE_TTL) return true;
     }
   } catch(e) {}
 
@@ -4116,6 +4703,43 @@ async function loadPsxSymbols() {
     try {
       localStorage.setItem(SYMBOLS_CACHE_KEY, JSON.stringify({ list, fetchedAt: Date.now() }));
     } catch(e) {}
+    return true;
+  }
+  return false;
+}
+
+const AMC_FUNDS_CACHE_KEY = 'psxAmcFundsCache_v1';
+const AMC_FUNDS_CACHE_TTL = 24 * 60 * 60 * 1000;
+
+// Same "instant hardcoded baseline, then silently upgrade" pattern as loadPsxSymbols()
+// above, for AMC_FUNDS/FUND_CATEGORY - see the comment on AMC_FUNDS's declaration for why
+// this exists (a hand-maintained hardcoded list is what went stale for Faysal Asset
+// Management). force: skips the cache-TTL early-return, used by the manual "Sync Stocks &
+// Funds" button in Settings.
+async function loadAmcFundsDirectory(force = false) {
+  try {
+    const cached = JSON.parse(localStorage.getItem(AMC_FUNDS_CACHE_KEY) || 'null');
+    if (cached && cached.amcFunds && cached.fundCategory) {
+      AMC_FUNDS = cached.amcFunds;
+      FUND_CATEGORY = cached.fundCategory;
+      if (!force && Date.now() - cached.fetchedAt < AMC_FUNDS_CACHE_TTL) return true;
+    }
+  } catch(e) {}
+
+  try {
+    const res = await fetch('/api/funds/amc-directory', { credentials: 'include' });
+    if (!res.ok) return false;
+    const data = await res.json();
+    if (!data.amcFunds || Object.keys(data.amcFunds).length === 0) return false;
+
+    AMC_FUNDS = data.amcFunds;
+    FUND_CATEGORY = data.fundCategory;
+    try {
+      localStorage.setItem(AMC_FUNDS_CACHE_KEY, JSON.stringify({ amcFunds: data.amcFunds, fundCategory: data.fundCategory, fetchedAt: Date.now() }));
+    } catch(e) {}
+    return true;
+  } catch(e) {
+    return false;
   }
 }
 
@@ -8541,9 +9165,9 @@ function isNavStale(navUpdatedAt) {
 // the way stock prices do: MUFAP publishes once a day, not intraday. Also wired to the
 // "Sync NAVs from MUFAP" button for an explicit, visible re-check (silent=false, reports
 // what happened either way).
-async function syncMufapNavs(silent = false) {
+async function syncMufapNavs(silent = false, force = false) {
   try {
-    const res = await fetch('/api/funds/sync-mufap-navs', { method: 'POST', credentials: 'include' });
+    const res = await fetch(`/api/funds/sync-mufap-navs?force=${force}`, { method: 'POST', credentials: 'include' });
     if (!res.ok) {
       if (!silent) toast('Could not sync NAVs from MUFAP', 'error');
       return;
@@ -8568,6 +9192,33 @@ async function syncMufapNavs(silent = false) {
     }
   } catch (e) {
     if (!silent) toast('Network error — could not sync NAVs from MUFAP', 'error');
+  }
+}
+
+// Manual "Sync Stocks & Funds" button in Settings - forces a fresh pull of the PSX symbol
+// list (loadPsxSymbols) and the MUFAP AMC/fund directory + NAVs (syncMufapNavs +
+// loadAmcFundsDirectory), bypassing both caches' normal TTLs. For a user who just heard
+// PSX listed something new or an AMC launched a fund, this means not waiting on the
+// automatic daily/24h refresh - everything here is otherwise already kept current on its
+// own (stocks on every page load, funds via the hourly MufapNavDailySyncWorker), so this
+// button exists for visibility and control, not because anything would silently go stale
+// without it.
+async function syncStocksAndFunds() {
+  const btn = document.getElementById('syncStocksFundsBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Syncing…'; }
+  try {
+    const stocksOk = await loadPsxSymbols(true);
+    await syncMufapNavs(true, true);
+    const fundsOk = await loadAmcFundsDirectory(true);
+
+    if (stocksOk && fundsOk) toast('Stocks and mutual funds lists synced', 'success');
+    else if (stocksOk) toast('Stocks synced, but the mutual funds directory could not be reached', 'warning');
+    else if (fundsOk) toast('Mutual funds synced, but the stock list could not be reached', 'warning');
+    else toast('Could not reach either source — using what was already cached', 'error');
+  } catch (e) {
+    toast('Network error — could not sync stocks and funds', 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '↻ Sync Stocks & Funds'; }
   }
 }
 
@@ -8685,6 +9336,10 @@ function switchView(name) {
   // auto-refreshing too. Left visible on Overview, which still mixes in live stock value.
   const tickerGroup = document.getElementById('stockTickerGroup');
   if (tickerGroup) tickerGroup.style.display = name === 'funds' ? 'none' : '';
+  // "+ Add Transaction" in the header opens the stock modal specifically - the Funds tab
+  // has its own equivalent button, so this one is dead weight (and confusing) there.
+  const addStockBtn = document.getElementById('headerAddStockTxBtn');
+  if (addStockBtn) addStockBtn.style.display = name === 'funds' ? 'none' : '';
   try { localStorage.setItem('psxActiveTab', name); } catch {}
 }
 
@@ -8700,6 +9355,7 @@ async function init() {
 
   renderAll();
   loadPsxSymbols();
+  loadAmcFundsDirectory();
   checkImportLocalData();
   // Once per page load, not on a timer - MUFAP only publishes once a day, so there's
   // nothing to gain by re-checking every 15s the way stock prices do. syncMufapNavs()

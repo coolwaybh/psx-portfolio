@@ -1144,14 +1144,44 @@ funds.MapPost("/nav-updates", async (FundNavBulkUpdateRequest req, ClaimsPrincip
 
 // Pulls today's NAV for every fund this user tracks from MUFAP's daily industry-wide publish
 // (see MufapNavSyncService) - called once automatically after the frontend loads (see
-// syncMufapNavs() in index.html) and available as a manual "Sync NAVs" button. The underlying
-// scrape is shared and cached across every user, so calling this often is cheap - MUFAP itself
-// is only actually fetched once per calendar day regardless of how many users trigger it.
-funds.MapPost("/sync-mufap-navs", async (ClaimsPrincipal principal, MufapNavSyncService svc) =>
+// syncMufapNavs() in index.html) and available as a manual "Sync Stocks & Funds" button in
+// Settings (force=true there, bypassing the once-a-day cache check). The underlying scrape is
+// shared and cached across every user, so calling this often is cheap - MUFAP itself is only
+// actually fetched once per calendar day unless force is set.
+funds.MapPost("/sync-mufap-navs", async (bool? force, ClaimsPrincipal principal, MufapNavSyncService svc) =>
 {
     var userId = principal.GetUserId();
-    var result = await svc.SyncAsync(userId);
+    var result = await svc.SyncAsync(userId, force ?? false);
     return Results.Ok(new { updated = result.Updated, totalFunds = result.TotalFunds, unmatched = result.Unmatched });
+});
+
+// The AMC -> fund-name (and fund -> category) directory the "Add New Fund" picker and the
+// PDF-import matcher use - built from the same MufapNavs cache the NAV sync already
+// maintains, so it's never stale the way a hand-maintained hardcoded list was (confirmed
+// against Faysal Asset Management: 21 of its 30 real current funds were missing from that
+// list, and several hardcoded entries had been discontinued/renamed). Read-only, no sync
+// triggered here - the frontend calls /sync-mufap-navs first (see loadAmcFundsDirectory()),
+// same cache either way.
+funds.MapGet("/amc-directory", async (PsxDbContext db) =>
+{
+    var rows = await db.MufapNavs.AsNoTracking().OrderBy(m => m.FundName).ToListAsync();
+
+    var amcFunds = new Dictionary<string, List<string>>();
+    var fundCategory = new Dictionary<string, string>();
+    foreach (var r in rows)
+    {
+        if (r.Amc.Length == 0) continue;
+        if (!amcFunds.TryGetValue(r.Amc, out var list))
+            amcFunds[r.Amc] = list = [];
+        list.Add(r.FundName);
+        // MUFAP's own wording is "Shariah Compliant X" - shortened to "Islamic X" to match
+        // this app's existing category convention (and the hardcoded AMC_FUNDS fallback
+        // the frontend shows before this loads), so there's no visible flicker once the
+        // live directory replaces it.
+        fundCategory[r.FundName] = r.Category.Replace("Shariah Compliant ", "Islamic ");
+    }
+
+    return Results.Ok(new { amcFunds, fundCategory });
 });
 
 // ── ADMIN ─────────────────────────────────────────────────────────────
