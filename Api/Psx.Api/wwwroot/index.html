@@ -1170,7 +1170,7 @@ a{color:var(--accent);text-decoration:none}
       <div style="display:flex;gap:8px">
         <input type="file" id="fundPdfImportInput" accept="application/pdf" style="display:none" onchange="handleFundPdfFileSelected(event)">
         <button class="btn btn-sm" onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
-        <button class="btn btn-sm" onclick="syncMufapNavs()">⇩ Sync NAVs from MUFAP</button>
+        <button class="btn btn-sm" onclick="syncMufapNavs(false, true)">⇩ Sync NAVs from MUFAP</button>
         <button class="btn btn-sm" onclick="openNavUpdateModal()">↻ Update NAVs</button>
         <button class="btn btn-sm" onclick="openModalForOpeningPositionFund()">+ Add Opening Position</button>
         <button class="btn btn-sm btn-primary" onclick="openFundModal('buy')">+ Add Transaction</button>
@@ -9276,10 +9276,12 @@ function isNavStale(navUpdatedAt) {
 
 // Pulls today's NAV for every tracked fund from MUFAP's daily publish (POST
 // /api/funds/sync-mufap-navs - see MufapNavSyncService). Called once, unprompted, on every
-// page load (silent=true - see init()) since there's nothing to gain re-checking on a timer
-// the way stock prices do: MUFAP publishes once a day, not intraday. Also wired to the
-// "Sync NAVs from MUFAP" button for an explicit, visible re-check (silent=false, reports
-// what happened either way).
+// page load (silent=true, force=false - see init()) since there's nothing to gain
+// re-checking on a timer the way stock prices do: MUFAP publishes once a day, not
+// intraday, and the server already self-throttles by AsOfDate regardless. Also wired to
+// the "Sync NAVs from MUFAP" button for an explicit, visible re-check (silent=false so it
+// reports what happened either way, force=true since a human clicking a button is by
+// definition not spam - the server may still no-op if it already has today's data).
 async function syncMufapNavs(silent = false, force = false) {
   try {
     const res = await fetch(`/api/funds/sync-mufap-navs?force=${force}`, { method: 'POST', credentials: 'include' });

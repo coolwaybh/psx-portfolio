@@ -10,10 +10,11 @@ public record MufapSyncResult(int Updated, int TotalFunds, List<string> Unmatche
 // timer - shared hosting (MonsterASP) can idle-recycle the app pool overnight, so a "wait until
 // 6pm" timer isn't reliable here. Instead this runs on demand (called once per page load, plus
 // a manual "Sync NAVs" button - see POST /api/funds/sync-mufap-navs) and self-throttles the
-// expensive part: the industry-wide scrape only happens once per calendar day, shared across
-// every user, via the MufapNavs cache table - same "fetch on demand, cache, advance-only" shape
-// as EodPrice and FundamentalView elsewhere in this app, chosen over a real cron for the same
-// reason.
+// expensive part: the industry-wide scrape is skipped once the shared MufapNavs cache already
+// reflects today's publish (by AsOfDate, not merely "was a fetch attempted today" - see
+// RefreshCacheIfStaleAsync for why that distinction matters), shared across every user - same
+// "fetch on demand, cache, advance-only" shape as EodPrice and FundamentalView elsewhere in
+// this app, chosen over a real cron for the same reason.
 public class MufapNavSyncService(PsxDbContext db, IHttpClientFactory httpFactory)
 {
     // force: bypasses the "already fetched today" check - used by the manual "Sync Stocks &
@@ -29,9 +30,21 @@ public class MufapNavSyncService(PsxDbContext db, IHttpClientFactory httpFactory
 
     async Task RefreshCacheIfStaleAsync(bool force)
     {
-        var today = DateTime.UtcNow.Date;
-        var latestFetch = await db.MufapNavs.MaxAsync(m => (DateTime?)m.FetchedAtUtc);
-        if (!force && latestFetch is not null && latestFetch.Value.Date == today) return;
+        if (!force)
+        {
+            // Gated on whether the cache actually holds TODAY's publish (AsOfDate), not
+            // merely whether a fetch was attempted today (FetchedAtUtc) - MUFAP doesn't
+            // publish at a fixed time, so the day's first fetch (a page load, or
+            // MufapNavDailySyncWorker's own hourly tick) can easily land before that day's
+            // publish and cache still-yesterday's data. Gating on "did we call the network
+            // today" then blocked every later attempt for the rest of the day even though
+            // nothing new was ever actually caught - confirmed as the exact bug a user hit:
+            // an early fetch cached yesterday's NAV, and the manual Sync button kept
+            // reporting "already up to date" long after MUFAP had actually published.
+            var today = DateOnly.FromDateTime(DateTime.UtcNow);
+            var latestAsOfDate = await db.MufapNavs.MaxAsync(m => (DateOnly?)m.AsOfDate);
+            if (latestAsOfDate is not null && latestAsOfDate.Value >= today) return;
+        }
 
         List<MufapNavEntry> entries;
         try
