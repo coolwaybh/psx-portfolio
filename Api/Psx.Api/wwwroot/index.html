@@ -572,9 +572,15 @@ a{color:var(--accent);text-decoration:none}
     <span id="methodLabel" class="method-pill">WA Cost</span>
   </div>
   <div class="header-actions">
-    <span id="marketTicker" class="market-ticker" title="KSE-100, Pakistan Stock Exchange benchmark index"></span>
-    <span id="volumeTicker" class="market-ticker" title="Total shares traded across PSX today"></span>
-    <span id="refreshTimer" class="refresh-timer" title="Prices auto-refresh every 15 seconds"></span>
+    <!-- Stock-only: KSE-100/volume/the 15s auto-refresh timer all describe live PSX price
+         data, not mutual funds (whose NAV is a manual/daily-statement figure, never
+         auto-refreshed - see updateFundCgtPreview and the PDF import flow). Hidden outside
+         the Stocks tab by switchView() so it never implies funds are live-refreshing too. -->
+    <span id="stockTickerGroup" style="display:flex;align-items:center;gap:8px">
+      <span id="marketTicker" class="market-ticker" title="KSE-100, Pakistan Stock Exchange benchmark index"></span>
+      <span id="volumeTicker" class="market-ticker" title="Total shares traded across PSX today"></span>
+      <span id="refreshTimer" class="refresh-timer" title="Prices auto-refresh every 15 seconds"></span>
+    </span>
     <button class="btn btn-sm btn-primary" onclick="openModal()">
       + Add Transaction
     </button>
@@ -1160,6 +1166,7 @@ a{color:var(--accent);text-decoration:none}
       <div style="display:flex;gap:8px">
         <input type="file" id="fundPdfImportInput" accept="application/pdf" style="display:none" onchange="handleFundPdfFileSelected(event)">
         <button class="btn btn-sm" onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
+        <button class="btn btn-sm" onclick="syncMufapNavs()">⇩ Sync NAVs from MUFAP</button>
         <button class="btn btn-sm" onclick="openNavUpdateModal()">↻ Update NAVs</button>
         <button class="btn btn-sm" onclick="openModalForOpeningPositionFund()">+ Add Opening Position</button>
         <button class="btn btn-sm btn-primary" onclick="openFundModal('buy')">+ Add Transaction</button>
@@ -2296,6 +2303,28 @@ const PRICES_CACHE_KEY = 'psxPricesCache_v1';
 const INDEX_CACHE_KEY = 'psxIndexCache_v1';
 
 // Returns false (and redirects to the login page) if the session isn't authenticated.
+// Shared by loadState() (initial page load) and syncMufapNavs() (re-fetching after the server
+// updates NAVs behind the scenes) - both need the exact same GET /api/funds response shape
+// parsed into state.funds, so this is the one place that mapping is written.
+function parseFundsPayload(fundsData) {
+  return {
+    funds: fundsData.funds.map(f => ({ ...f, currentNav: parseFloat(f.currentNav) })),
+    transactions: fundsData.transactions.map(t => ({
+      ...t,
+      units: parseFloat(t.units),
+      nav: parseFloat(t.nav),
+      amount: parseFloat(t.amount),
+      frontLoadPct: parseFloat(t.frontLoadPct) || 0,
+      backLoadPct: parseFloat(t.backLoadPct) || 0,
+      cgtAmount: t.cgtAmount != null ? parseFloat(t.cgtAmount) : null
+    })),
+    navHistory: Object.fromEntries(
+      Object.entries(fundsData.navHistory || {}).map(([fundId, points]) =>
+        [fundId, points.map(p => ({ date: p.date, nav: parseFloat(p.nav) }))])
+    )
+  };
+}
+
 async function loadState() {
   loadPricesCache();
   try {
@@ -2328,23 +2357,7 @@ async function loadState() {
       balance: parseFloat(cashData.balance) || 0,
       entries: cashData.entries.map(c => ({ ...c, amount: parseFloat(c.amount) }))
     };
-    const fundsData = await fundsRes.json();
-    state.funds = {
-      funds: fundsData.funds.map(f => ({ ...f, currentNav: parseFloat(f.currentNav) })),
-      transactions: fundsData.transactions.map(t => ({
-        ...t,
-        units: parseFloat(t.units),
-        nav: parseFloat(t.nav),
-        amount: parseFloat(t.amount),
-        frontLoadPct: parseFloat(t.frontLoadPct) || 0,
-        backLoadPct: parseFloat(t.backLoadPct) || 0,
-        cgtAmount: t.cgtAmount != null ? parseFloat(t.cgtAmount) : null
-      })),
-      navHistory: Object.fromEntries(
-        Object.entries(fundsData.navHistory || {}).map(([fundId, points]) =>
-          [fundId, points.map(p => ({ date: p.date, nav: parseFloat(p.nav) }))])
-      )
-    };
+    state.funds = parseFundsPayload(await fundsRes.json());
   } catch(e) {
     console.warn('State load error', e);
     toast('Could not load your portfolio from the server', 'error');
@@ -8515,6 +8528,42 @@ function isNavStale(navUpdatedAt) {
   return ageMs > NAV_STALE_DAYS * 24 * 60 * 60 * 1000;
 }
 
+// Pulls today's NAV for every tracked fund from MUFAP's daily publish (POST
+// /api/funds/sync-mufap-navs - see MufapNavSyncService). Called once, unprompted, on every
+// page load (silent=true - see init()) since there's nothing to gain re-checking on a timer
+// the way stock prices do: MUFAP publishes once a day, not intraday. Also wired to the
+// "Sync NAVs from MUFAP" button for an explicit, visible re-check (silent=false, reports
+// what happened either way).
+async function syncMufapNavs(silent = false) {
+  try {
+    const res = await fetch('/api/funds/sync-mufap-navs', { method: 'POST', credentials: 'include' });
+    if (!res.ok) {
+      if (!silent) toast('Could not sync NAVs from MUFAP', 'error');
+      return;
+    }
+    const result = await res.json();
+
+    if (result.updated > 0) {
+      state.funds = parseFundsPayload(await (await fetch('/api/funds', { credentials: 'include' })).json());
+      renderFundsView();
+      renderOverviewView();
+    }
+
+    if (silent) return;
+    if (result.totalFunds === 0) {
+      toast('No funds to sync', 'info');
+    } else if (result.updated > 0) {
+      toast(`Synced ${result.updated} of ${result.totalFunds} fund NAV${result.updated === 1 ? '' : 's'} from MUFAP`, 'success');
+    } else if (result.unmatched.length === result.totalFunds) {
+      toast(`No MUFAP match for ${result.totalFunds === 1 ? 'your fund' : 'any of your funds'} — check the fund name against MUFAP's own spelling`, 'warning');
+    } else {
+      toast('NAVs already up to date', 'info');
+    }
+  } catch (e) {
+    if (!silent) toast('Network error — could not sync NAVs from MUFAP', 'error');
+  }
+}
+
 function openNavUpdateModal() {
   const funds = state.funds.funds;
   const rowsEl = document.getElementById('navUpdateRows');
@@ -8624,6 +8673,11 @@ function switchView(name) {
     document.getElementById(id).style.display = key === name ? '' : 'none';
     document.getElementById('tabBtn' + key[0].toUpperCase() + key.slice(1)).classList.toggle('active', key === name);
   }
+  // KSE-100/volume/refresh-timer describe live stock prices, never funds (NAV is manual/daily
+  // only) - hide the group on the Mutual Funds tab so it doesn't look like fund data is
+  // auto-refreshing too. Left visible on Overview, which still mixes in live stock value.
+  const tickerGroup = document.getElementById('stockTickerGroup');
+  if (tickerGroup) tickerGroup.style.display = name === 'funds' ? 'none' : '';
   try { localStorage.setItem('psxActiveTab', name); } catch {}
 }
 
@@ -8640,6 +8694,11 @@ async function init() {
   renderAll();
   loadPsxSymbols();
   checkImportLocalData();
+  // Once per page load, not on a timer - MUFAP only publishes once a day, so there's
+  // nothing to gain by re-checking every 15s the way stock prices do. syncMufapNavs()
+  // itself is silent (no toast) here since it runs unprompted on every load; the same
+  // function reports results when triggered from the manual "Sync NAVs" button.
+  if (state.funds.funds.length > 0) syncMufapNavs(true);
 
   let savedTab = 'stocks';
   try { savedTab = localStorage.getItem('psxActiveTab') || 'stocks'; } catch {}

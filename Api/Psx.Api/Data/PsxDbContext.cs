@@ -14,6 +14,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
     public DbSet<MutualFund> MutualFunds => Set<MutualFund>();
     public DbSet<FundTransaction> FundTransactions => Set<FundTransaction>();
     public DbSet<FundNavHistory> FundNavHistories => Set<FundNavHistory>();
+    public DbSet<MufapNav> MufapNavs => Set<MufapNav>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -155,6 +156,13 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
                 .WithMany()
                 .HasForeignKey(h => h.FundId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<MufapNav>(b =>
+        {
+            b.Property(m => m.FundName).HasMaxLength(200);
+            b.Property(m => m.Nav).HasColumnType("decimal(18,4)");
+            b.HasIndex(m => m.FundName).IsUnique();
         });
     }
 }

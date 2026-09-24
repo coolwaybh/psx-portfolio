@@ -34,6 +34,7 @@ builder.Services.AddDbContext<PsxDbContext>(options =>
 builder.Services.AddSingleton<PsxSymbolDirectory>();
 builder.Services.AddMemoryCache();
 builder.Services.AddScoped<FundamentalAnalysisService>();
+builder.Services.AddScoped<MufapNavSyncService>();
 
 builder.Services.AddHttpClient<PsxHistoricalPriceService>(client =>
 {
@@ -1138,6 +1139,18 @@ funds.MapPost("/nav-updates", async (FundNavBulkUpdateRequest req, ClaimsPrincip
     });
 
     return Results.Ok(new { updated = parsed.Count });
+});
+
+// Pulls today's NAV for every fund this user tracks from MUFAP's daily industry-wide publish
+// (see MufapNavSyncService) - called once automatically after the frontend loads (see
+// syncMufapNavs() in index.html) and available as a manual "Sync NAVs" button. The underlying
+// scrape is shared and cached across every user, so calling this often is cheap - MUFAP itself
+// is only actually fetched once per calendar day regardless of how many users trigger it.
+funds.MapPost("/sync-mufap-navs", async (ClaimsPrincipal principal, MufapNavSyncService svc) =>
+{
+    var userId = principal.GetUserId();
+    var result = await svc.SyncAsync(userId);
+    return Results.Ok(new { updated = result.Updated, totalFunds = result.TotalFunds, unmatched = result.Unmatched });
 });
 
 // ── ADMIN ─────────────────────────────────────────────────────────────
