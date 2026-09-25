@@ -3345,9 +3345,9 @@ function renderAsOfResults(requestedDate) {
       : (row.asOfDate && row.asOfDate !== requestedDate ? `as of ${row.asOfDate}` : '');
     return `<tr>
       <td><span class="sym">${escapeHtml(sym)}</span></td>
-      <td><input type="number" class="form-input mono" style="width:100px;font-size:12px;padding:5px 8px" value="${row.shares}" step="0.01" min="0" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', 'shares', this.value)"></td>
+      <td><input type="number" class="form-input mono no-spin" style="width:100px;font-size:12px;padding:5px 8px" value="${row.shares}" step="0.01" min="0" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', 'shares', this.value)"></td>
       <td>
-        <input type="number" class="form-input mono" style="width:110px;font-size:12px;padding:5px 8px" value="${row.price ?? ''}" step="0.01" min="0" placeholder="—" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', 'price', this.value)">
+        <input type="number" class="form-input mono no-spin" style="width:110px;font-size:12px;padding:5px 8px" value="${row.price ?? ''}" step="0.01" min="0" placeholder="—" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', 'price', this.value)">
         <div id="asOfNote_${escapeHtml(sym)}" style="font-size:10px;color:var(--txt3);margin-top:2px">${note}</div>
       </td>
       <td class="mono" id="asOfValue_${escapeHtml(sym)}">${row.price != null ? fPKR(row.shares * row.price) : '—'}</td>
@@ -3360,7 +3360,7 @@ function renderAsOfResults(requestedDate) {
   // since a sold position is by definition missing from today's holdings.
   const addRowHtml = `<tr class="asOfAddRow">
     <td><input type="text" id="asOfNewSymbol" class="form-input mono" list="symbolList" placeholder="Symbol" style="width:100px;font-size:12px;padding:5px 8px" oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter'){event.preventDefault();addAsOfRow();}"></td>
-    <td><input type="number" id="asOfNewShares" class="form-input mono" placeholder="Shares" style="width:100px;font-size:12px;padding:5px 8px" step="0.01" min="0" onkeydown="if(event.key==='Enter'){event.preventDefault();addAsOfRow();}"></td>
+    <td><input type="number" id="asOfNewShares" class="form-input mono no-spin" placeholder="Shares" style="width:100px;font-size:12px;padding:5px 8px" step="0.01" min="0" onkeydown="if(event.key==='Enter'){event.preventDefault();addAsOfRow();}"></td>
     <td colspan="2" style="font-size:11px;color:var(--txt3)">Held on this date but sold since, or missing for another reason? Add it — price is looked up automatically.</td>
     <td><button type="button" class="btn btn-sm" onclick="addAsOfRow()">+ Add</button></td>
   </tr>`;
@@ -8066,6 +8066,13 @@ function fNum(v) {
   });
 }
 
+// Fund unit counts - always exactly 2 decimal places, unlike fNum's variable-precision
+// (up to 4dp) stock-share formatting. Every AMC's own statement quotes unit balances to
+// 2dp, so matching that reads as correct rather than falsely over-precise.
+function fUnits(v) {
+  return v.toLocaleString('en-PK', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
 function setText(id, text) {
   const el = document.getElementById(id);
   if (el) el.textContent = text;
@@ -8350,11 +8357,11 @@ function renderFundsView() {
         <td style="text-align:left"><span class="sym">${escapeHtml(f.name)}</span></td>
         <td style="text-align:left">${escapeHtml(f.amc) || '—'}</td>
         <td style="text-align:left"><span class="sector-tag">${escapeHtml(f.category) || '—'}</span></td>
-        <td>${fNum(h.units)}</td>
+        <td>${fUnits(h.units)}</td>
         <td>${h.units > 1e-9 ? fPKR(h.avgCost) : '—'}</td>
         <td>${fPKR(f.currentNav)}</td>
         <td style="text-align:left;font-family:var(--mono)">${f.navUpdatedAt}${isNavStale(f.navUpdatedAt) ? ' <span class="price-status stale">stale</span>' : ''}</td>
-        <td class="val-neu">${fPKR(h.currentValue)}</td>
+        <td class="val-neu">${fPKR0(h.currentValue)}</td>
         <td class="${h.unrealizedPL >= 0 ? 'val-pos' : 'val-neg'}">${h.units > 1e-9 ? `${fPKR(h.unrealizedPL, true)} (${fPct(h.unrealizedPLPct, true)})` : '—'}</td>
         <td>${totalValue > 0 ? fPct(weight) : '—'}</td>
       </tr>`;
@@ -8377,7 +8384,7 @@ function renderFundsView() {
         <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
         <td style="text-align:left"><span class="tx-type ${typeClass[tx.type] || ''}">${typeLabel[tx.type] || tx.type.toUpperCase()}</span></td>
         <td style="text-align:left"><span class="sym">${escapeHtml(fund ? fund.name : '—')}</span></td>
-        <td>${tx.units ? fNum(tx.units) : '—'}</td>
+        <td>${tx.units ? fUnits(tx.units) : '—'}</td>
         <td>${tx.nav ? fPKR(tx.nav) : '—'}</td>
         <td class="${tx.type === 'sell' || tx.type === 'dividendcash' ? 'val-pos' : 'val-neg'}">${tx.type === 'sell' || tx.type === 'dividendcash' ? '+' : '-'}${fPKR(tx.amount)}${tx.cgtAmount ? `<br><span style="font-size:9px;color:var(--txt3);font-weight:400">CGT withheld: ${fPKR(tx.cgtAmount)}</span>` : ''}</td>
         <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:160px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(tx.notes) || '—'}</td>
@@ -8400,7 +8407,7 @@ function renderFundKpis(holdings, totalValue) {
   const gainPct = totalInvested > 0 ? (gain / totalInvested) * 100 : 0;
 
   setText('fkv-invested', totalInvested > 0 ? fPKR(totalInvested) : '—');
-  setText('fkv-value', totalValue > 0 ? fPKR(totalValue) : '—');
+  setText('fkv-value', totalValue > 0 ? fPKR0(totalValue) : '—');
 
   const gainEl = document.getElementById('fkv-gain');
   gainEl.textContent = totalInvested > 0 ? fPKR(gain, true) : '—';
@@ -8919,7 +8926,7 @@ function updateFundSellHint() {
   if (fundModalType !== 'sell') return;
   const fundId = parseInt(document.getElementById('fFundPicker').value, 10);
   const held = fundId ? fundUnitsHeld(fundId) : 0;
-  document.getElementById('fundUnitsHeldDisplay').textContent = fNum(held);
+  document.getElementById('fundUnitsHeldDisplay').textContent = fUnits(held);
   if (document.getElementById('fFundSellAll').checked) {
     document.getElementById('fFundUnits').value = held || '';
     updateFundAmountPreview();
@@ -9035,7 +9042,7 @@ async function submitFundTransaction() {
   if (fundModalType === 'sell' && !isNewFund && pickerVal) {
     const held = fundUnitsHeld(parseInt(pickerVal, 10));
     if (units > held + 1e-9) {
-      toast(`Cannot sell ${fNum(units)} units — only ${fNum(held)} available`, 'error');
+      toast(`Cannot sell ${fUnits(units)} units — only ${fUnits(held)} available`, 'error');
       valid = false;
     }
   }
@@ -9116,7 +9123,7 @@ async function deleteFundTransaction(id) {
   const tx = state.funds.transactions.find(t => t.id === id);
   if (!tx) return;
   const fund = state.funds.funds.find(f => f.id === tx.fundId);
-  const label = `${tx.type.toUpperCase()} ${tx.units ? fNum(tx.units) + ' units of ' : ''}${fund ? fund.name : 'this fund'}`;
+  const label = `${tx.type.toUpperCase()} ${tx.units ? fUnits(tx.units) + ' units of ' : ''}${fund ? fund.name : 'this fund'}`;
   if (!confirm(`Delete this ${label}? This cannot be undone.`)) return;
 
   try {
@@ -9492,7 +9499,7 @@ function openEditFundTxModal(id) {
 
   editFundTxId = id;
   document.getElementById('eftSummary').textContent =
-    `${tx.type.toUpperCase()} ${tx.units ? fNum(tx.units) + ' units of ' : ''}${fund ? fund.name : ''} on ${tx.date}`;
+    `${tx.type.toUpperCase()} ${tx.units ? fUnits(tx.units) + ' units of ' : ''}${fund ? fund.name : ''} on ${tx.date}`;
   document.getElementById('eftDate').value = tx.date;
   document.getElementById('eftNotes').value = tx.notes || '';
   document.getElementById('editFundTxBackdrop').classList.add('open');
@@ -9643,7 +9650,7 @@ function openNavUpdateModal() {
         </div>
         <div class="form-group" style="margin:0">
           <label class="form-label">NAV (PKR)</label>
-          <input type="number" class="form-input mono nav-update-input" data-fund-id="${f.id}" value="${f.currentNav}" min="0.01" step="0.01">
+          <input type="number" class="form-input mono nav-update-input no-spin" data-fund-id="${f.id}" value="${f.currentNav.toFixed(2)}" min="0.01" step="0.01">
         </div>
         <div class="form-group" style="margin:0">
           <label class="form-label">As Of Date</label>
