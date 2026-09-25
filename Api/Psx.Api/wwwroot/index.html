@@ -1201,7 +1201,7 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
       <div style="display:flex;gap:8px">
         <input type="file" id="fundPdfImportInput" accept="application/pdf" style="display:none" onchange="handleFundPdfFileSelected(event)">
         <button class="btn btn-sm" title="Reliably parses UBL Fund Managers / Al-Ameen's &quot;Portfolio Statement with Investment Cost&quot; only. Other statements may not parse - use + Add Opening Position instead." onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
-        <button class="btn btn-sm" onclick="syncMufapNavs(false, true)">⇩ Sync NAVs from MUFAP</button>
+        <button class="btn btn-sm" id="syncMufapNavsBtn" onclick="syncMufapNavs(false, true)">⇩ Sync NAVs from MUFAP</button>
         <button class="btn btn-sm" onclick="openNavUpdateModal()">↻ Update NAVs</button>
         <button class="btn btn-sm" onclick="openModalForOpeningPositionFund()">+ Add Opening Position</button>
         <button class="btn btn-sm btn-primary" onclick="openFundModal('buy')">+ Add Transaction</button>
@@ -9551,6 +9551,18 @@ function isNavStale(navUpdatedAt) {
 // reports what happened either way, force=true since a human clicking a button is by
 // definition not spam - the server may still no-op if it already has today's data).
 async function syncMufapNavs(silent = false, force = false) {
+  // MUFAP's own fetch (via r.jina.ai, see MufapNavFetcher) routinely takes several
+  // seconds - long enough that a click with no feedback reads as broken, not working.
+  // Shown for every call, not just the manual button click, so the button also visibly
+  // spins during the on-load/background syncs (init's startup sync, the hourly worker's
+  // effect on next page load, syncStocksAndFunds' forced sync) rather than only ever
+  // reacting to a direct click.
+  const btn = document.getElementById('syncMufapNavsBtn');
+  const btnOriginalHtml = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spin">⇩</span> Syncing…';
+  }
   try {
     const res = await fetch(`/api/funds/sync-mufap-navs?force=${force}`, { method: 'POST', credentials: 'include' });
     if (!res.ok) {
@@ -9577,6 +9589,11 @@ async function syncMufapNavs(silent = false, force = false) {
     }
   } catch (e) {
     if (!silent) toast('Network error — could not sync NAVs from MUFAP', 'error');
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.innerHTML = btnOriginalHtml;
+    }
   }
 }
 
