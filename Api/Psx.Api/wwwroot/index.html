@@ -1200,12 +1200,15 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
       <div class="section-title">Mutual Funds <span class="badge" id="fundCount">0</span></div>
       <div style="display:flex;gap:8px">
         <input type="file" id="fundPdfImportInput" accept="application/pdf" style="display:none" onchange="handleFundPdfFileSelected(event)">
-        <button class="btn btn-sm" onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
+        <button class="btn btn-sm" title="Reliably parses UBL Fund Managers / Al-Ameen's &quot;Portfolio Statement with Investment Cost&quot; only. Other statements may not parse - use + Add Opening Position instead." onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
         <button class="btn btn-sm" onclick="syncMufapNavs(false, true)">⇩ Sync NAVs from MUFAP</button>
         <button class="btn btn-sm" onclick="openNavUpdateModal()">↻ Update NAVs</button>
         <button class="btn btn-sm" onclick="openModalForOpeningPositionFund()">+ Add Opening Position</button>
         <button class="btn btn-sm btn-primary" onclick="openFundModal('buy')">+ Add Transaction</button>
       </div>
+    </div>
+    <div style="font-size:11px;color:var(--txt3);margin:-4px 0 14px">
+      PDF import reliably parses UBL Fund Managers / Al-Ameen's own "Portfolio Statement with Investment Cost" (the one showing your actual purchase cost, not just today's value). Any other AMC's statement — or Al-Ameen's plain Consolidated Statement without cost — may not parse correctly; use <strong>+ Add Opening Position</strong> to enter those by hand instead.
     </div>
 
     <div class="kpi-grid" style="padding:0 0 20px" id="fundKpiGrid">
@@ -9194,11 +9197,19 @@ async function handleFundPdfFileSelected(event) {
   }
 }
 
-// Strips the trailing "(ABBR)" scheme code and normalizes case/whitespace so a parsed
-// name can be compared against both the user's own funds (state.funds.funds) and the
-// curated AMC_FUNDS list, which are titlecased rather than the statement's ALL CAPS.
+// Strips the trailing "(ABBR)" scheme code and normalizes case/whitespace/hyphenation so
+// a parsed name can be compared against both the user's own funds (state.funds.funds)
+// and the curated AMC_FUNDS list, which are titlecased rather than the statement's ALL
+// CAPS. The hyphen fold matters more than it looks: UBL/Al-Ameen's own PDF statements
+// spell it "AL-AMEEN" (hyphenated - it's literally their brand name), but MUFAP's daily
+// NAV list - which AMC_FUNDS is sourced from - spells every one of their funds "Al Ameen"
+// (space, no hyphen). Without folding both to the same separator, "al-ameen islamic
+// income fund" never equals "al ameen islamic income fund" and matchFundCandidate()
+// silently fails for every Al-Ameen fund - the AMC/Fund pickers are left empty for the
+// user to fill by hand even though the statement was recognized and its numbers parsed
+// fine (those come from a separate regex, unaffected by this).
 function normalizeFundName(name) {
-  return name.replace(/\([A-Z0-9]+\)\s*$/, '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return name.replace(/\([A-Z0-9]+\)\s*$/, '').trim().toLowerCase().replace(/[-\s]+/g, ' ');
 }
 
 function matchFundCandidate(candidate) {
