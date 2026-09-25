@@ -57,6 +57,10 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;1,400&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<!-- .xlsx generation for the "Portfolio Value As Of Date" report (exportAsOfExcel) - the
+     only place in the app that needs a real Excel file rather than a CSV, since it's built
+     specifically to attach to a tax return. -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 /* ── CSS VARIABLES ─────────────────────────────────────────── */
 :root {
@@ -552,6 +556,27 @@ a{color:var(--accent);text-decoration:none}
   display:flex;align-items:center;gap:8px;
 }
 .disclaimer strong{color:var(--amber)}
+
+/* ── PORTFOLIO VALUE AS OF DATE: fallback banner + add-row ─────── */
+.asof-fallback-banner{
+  margin:0 0 10px;padding:8px 14px;
+  background:rgba(146,64,14,.05);border:1px solid rgba(146,64,14,.18);
+  border-radius:var(--r);font-size:11px;color:var(--txt2);
+}
+.asof-fallback-banner strong{color:var(--amber)}
+tr.asOfAddRow td{border-top:1px dashed var(--border)}
+
+/* ── PORTFOLIO VALUE AS OF DATE: print output ───────────────────
+   #asOfPrintArea is a direct child of <body> (see markup near </body>), built on demand
+   by printAsOf() from asOfRows and otherwise hidden. On print, everything else that's
+   also a direct child of body (header, tab nav, every .section) is hidden instead, so
+   the printed page is just this report regardless of which app view/theme is active. */
+#asOfPrintArea{display:none}
+@media print{
+  body.printing-asof > *:not(#asOfPrintArea){display:none!important}
+  #asOfPrintArea{display:block!important;padding:24px;background:#fff;color:#000}
+  #asOfPrintArea table{width:100%;border-collapse:collapse}
+}
 </style>
 </head>
 <body>
@@ -721,14 +746,19 @@ a{color:var(--accent);text-decoration:none}
     <div class="section-title">
       Portfolio Value As Of Date
     </div>
-    <div style="display:flex;gap:8px;align-items:center">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       <input type="date" id="asOfDate" class="form-input" style="font-size:12px;padding:4px 8px">
       <button class="btn btn-sm btn-primary" onclick="calculateAsOf()">Calculate</button>
+      <button class="btn btn-sm" onclick="printAsOf()">🖶 Print</button>
+      <button class="btn btn-sm" onclick="exportAsOfExcel()">⬇ Export Excel</button>
       <button class="btn btn-sm" onclick="exportAsOfCSV()">⬇ Export CSV</button>
     </div>
   </div>
   <div style="font-size:11px;color:var(--txt3);margin-bottom:10px">
-    Computes your share count per symbol as of the selected date from your transaction history, and looks up each symbol's PSX closing price on (or just before) that date. Shares shown are editable — useful if your transaction history is incomplete for a position held before you started using this app. Edits here are not saved; they only affect this calculation.
+    Computes your share count per symbol as of the selected date from your transaction history, and looks up each symbol's PSX closing price on (or just before) that date. If your ledger has no transactions that far back, today's holdings are shown instead, priced as of the selected date. Every row — shares and price — is editable, and you can remove a row or add one for a symbol you've since sold (so it no longer shows up in today's holdings) but held on the selected date. Edits here are not saved; they only affect this report, which is meant to be printed or exported for a tax return.
+  </div>
+  <div id="asOfFallbackBanner" class="asof-fallback-banner" style="display:none">
+    <strong>⚠ No ledger history reaches this date.</strong> Showing today's holdings, priced as of the date you selected — review each row and use Add/Remove below for anything you've since bought or sold.
   </div>
   <div class="tbl-wrap" id="asOfResultsWrap" style="display:none">
     <table class="tbl">
@@ -736,8 +766,9 @@ a{color:var(--accent);text-decoration:none}
         <tr>
           <th>Symbol</th>
           <th>Shares</th>
-          <th>Historical Price</th>
+          <th>Price</th>
           <th>Value</th>
+          <th></th>
         </tr>
       </thead>
       <tbody id="asOfTbody"></tbody>
@@ -3187,6 +3218,10 @@ function computeHoldingsAsOf(cutoffDate) {
 // for exploring a past date, never persisted, and must never leak into today's KPIs.
 let asOfRows = {};
 let asOfRequestedDate = null;
+// True when the selected date's own transaction history was empty and calculateAsOf()
+// fell back to pricing today's holdings as of that date instead (see its comment below) -
+// drives the warning banner in renderAsOfResults so that fallback is never silent.
+let asOfUsedFallback = false;
 
 // Fetches full EOD history for any of `symbols` not already cached in
 // state.priceHistory, merges the result in, and returns true if anything new was fetched
@@ -3245,10 +3280,23 @@ async function calculateAsOf() {
     return;
   }
 
-  const holdings = computeHoldingsAsOf(dateStr);
+  let holdings = computeHoldingsAsOf(dateStr);
+  let usedFallback = false;
+  if (Object.keys(holdings).length === 0) {
+    // Nothing in the ledger is dated on or before the selected date at all - not "sold
+    // everything by then", just no data reaching that far back (the common case: the
+    // user started using this app after already owning these positions for years).
+    // Reporting a hard zero would be actively wrong for a tax filing, so fall back to
+    // today's holdings, still priced as of the selected date, and flag it clearly - the
+    // user reconciles any since-bought/since-sold difference by hand with the
+    // edit/remove/add-row controls below.
+    const todayStr = new Date().toISOString().split('T')[0];
+    holdings = computeHoldingsAsOf(todayStr);
+    usedFallback = true;
+  }
   const symbols = Object.keys(holdings);
   if (symbols.length === 0) {
-    toast('No positions held as of that date', 'warning');
+    toast('No positions held as of that date, and no current holdings to fall back to', 'warning');
     document.getElementById('asOfResultsWrap').style.display = 'none';
     return;
   }
@@ -3275,7 +3323,11 @@ async function calculateAsOf() {
       };
     }
     asOfRequestedDate = dateStr;
+    asOfUsedFallback = usedFallback;
     renderAsOfResults(dateStr);
+    if (usedFallback) {
+      toast(`No ledger history reaches ${dateStr} — showing today's holdings priced as of that date instead`, 'warning', 6000);
+    }
   } catch (e) {
     toast('Network error — could not fetch historical prices', 'error');
   }
@@ -3283,35 +3335,136 @@ async function calculateAsOf() {
 
 function renderAsOfResults(requestedDate) {
   const tbody = document.getElementById('asOfTbody');
-  tbody.innerHTML = Object.keys(asOfRows).sort().map(sym => {
+  const rowsHtml = Object.keys(asOfRows).sort().map(sym => {
     const row = asOfRows[sym];
-    const priceCell = row.price == null
-      ? '<span class="val-neu">price unavailable</span>'
-      : `${fPKR(row.price)}${row.asOfDate && row.asOfDate !== requestedDate ? `<div style="font-size:10px;color:var(--txt3)">as of ${row.asOfDate}</div>` : ''}`;
+    const note = row.price == null
+      ? 'no market data — enter manually'
+      : (row.asOfDate && row.asOfDate !== requestedDate ? `as of ${row.asOfDate}` : '');
     return `<tr>
       <td><span class="sym">${escapeHtml(sym)}</span></td>
-      <td><input type="number" class="form-input mono" style="width:100px;font-size:12px;padding:5px 8px" value="${row.shares}" step="0.01" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', this.value)"></td>
-      <td>${priceCell}</td>
+      <td><input type="number" class="form-input mono" style="width:100px;font-size:12px;padding:5px 8px" value="${row.shares}" step="0.01" min="0" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', 'shares', this.value)"></td>
+      <td>
+        <input type="number" class="form-input mono" style="width:110px;font-size:12px;padding:5px 8px" value="${row.price ?? ''}" step="0.01" min="0" placeholder="—" oninput="recalcAsOfRow('${escapeForJsAttr(sym)}', 'price', this.value)">
+        <div id="asOfNote_${escapeHtml(sym)}" style="font-size:10px;color:var(--txt3);margin-top:2px">${note}</div>
+      </td>
       <td class="mono" id="asOfValue_${escapeHtml(sym)}">${row.price != null ? fPKR(row.shares * row.price) : '—'}</td>
+      <td><button type="button" class="btn btn-sm btn-danger" title="Remove ${escapeHtml(sym)}" onclick="removeAsOfRow('${escapeForJsAttr(sym)}')">✕</button></td>
     </tr>`;
   }).join('');
+
+  // Permanent trailing row for adding a symbol not already in the list above - the
+  // "held then, sold since" case the current-holdings fallback can't cover on its own,
+  // since a sold position is by definition missing from today's holdings.
+  const addRowHtml = `<tr class="asOfAddRow">
+    <td><input type="text" id="asOfNewSymbol" class="form-input mono" list="symbolList" placeholder="Symbol" style="width:100px;font-size:12px;padding:5px 8px" oninput="this.value=this.value.toUpperCase()" onkeydown="if(event.key==='Enter'){event.preventDefault();addAsOfRow();}"></td>
+    <td><input type="number" id="asOfNewShares" class="form-input mono" placeholder="Shares" style="width:100px;font-size:12px;padding:5px 8px" step="0.01" min="0" onkeydown="if(event.key==='Enter'){event.preventDefault();addAsOfRow();}"></td>
+    <td colspan="2" style="font-size:11px;color:var(--txt3)">Held on this date but sold since, or missing for another reason? Add it — price is looked up automatically.</td>
+    <td><button type="button" class="btn btn-sm" onclick="addAsOfRow()">+ Add</button></td>
+  </tr>`;
+
+  tbody.innerHTML = rowsHtml + addRowHtml;
+
+  const banner = document.getElementById('asOfFallbackBanner');
+  if (banner) banner.style.display = asOfUsedFallback ? '' : 'none';
 
   document.getElementById('asOfResultsWrap').style.display = '';
   recalcAsOfTotal();
 }
 
-function recalcAsOfRow(symbol, sharesValue) {
-  const shares = parseFloat(sharesValue) || 0;
-  asOfRows[symbol].shares = shares;
+function recalcAsOfRow(symbol, field, value) {
   const row = asOfRows[symbol];
+  if (!row) return;
+  if (field === 'shares') {
+    row.shares = parseFloat(value) || 0;
+  } else if (field === 'price') {
+    const parsed = parseFloat(value);
+    row.price = value !== '' && !isNaN(parsed) ? parsed : null;
+    // A manual override supersedes whatever date PSX's own close came from - the "as
+    // of <date>" / "no market data" note below the input is now stale, so clear it.
+    row.asOfDate = null;
+    const note = document.getElementById(`asOfNote_${symbol}`);
+    if (note) note.textContent = '';
+  }
   const cell = document.getElementById(`asOfValue_${symbol}`);
-  if (cell) cell.textContent = row.price != null ? fPKR(shares * row.price) : '—';
+  if (cell) cell.textContent = row.price != null ? fPKR(row.shares * row.price) : '—';
   recalcAsOfTotal();
 }
 
 function recalcAsOfTotal() {
   const total = Object.values(asOfRows).reduce((sum, r) => sum + (r.price != null ? r.shares * r.price : 0), 0);
   document.getElementById('asOfTotal').textContent = fPKR(total);
+}
+
+// Drops a row entirely - e.g. the current-holdings fallback pulled in a symbol the user
+// didn't actually hold on the selected date.
+function removeAsOfRow(symbol) {
+  if (!(symbol in asOfRows)) return;
+  delete asOfRows[symbol];
+  if (Object.keys(asOfRows).length === 0) {
+    document.getElementById('asOfResultsWrap').style.display = 'none';
+  } else {
+    renderAsOfResults(asOfRequestedDate);
+  }
+  toast(`Removed ${symbol}`, 'info');
+}
+
+// Adds a symbol the report is missing - typically one sold after the selected date, so
+// it no longer appears in today's holdings the fallback above draws from. Shares are
+// entered by hand; price is looked up the same way as every other row (PSX close on or
+// before asOfRequestedDate), but stays editable since a delisted/thin symbol may have
+// none.
+async function addAsOfRow() {
+  if (!asOfRequestedDate) {
+    toast('Calculate a valuation first', 'warning');
+    return;
+  }
+  const symInput = document.getElementById('asOfNewSymbol');
+  const sharesInput = document.getElementById('asOfNewShares');
+  const symbol = (symInput.value || '').trim().toUpperCase();
+  const shares = parseFloat(sharesInput.value);
+
+  if (!symbol) {
+    toast('Enter a symbol', 'error');
+    symInput.focus();
+    return;
+  }
+  if (!(shares > 0)) {
+    toast('Enter the number of shares held', 'error');
+    sharesInput.focus();
+    return;
+  }
+  if (asOfRows[symbol]) {
+    toast(`${symbol} is already in the list — edit that row instead`, 'warning');
+    return;
+  }
+
+  asOfRows[symbol] = { shares, price: null, asOfDate: null };
+  renderAsOfResults(asOfRequestedDate);
+  await fetchAsOfPriceFor(symbol);
+}
+
+// Looks up a single symbol's historical price and patches it into an already-rendered
+// row - split out of calculateAsOf's bulk fetch so addAsOfRow doesn't have to
+// re-request every other row's price just to add one.
+async function fetchAsOfPriceFor(symbol) {
+  try {
+    const res = await fetch('/api/prices/historical', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ date: asOfRequestedDate, symbols: [symbol] })
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok || !(symbol in asOfRows)) return;
+
+    const price = body.prices?.[symbol];
+    asOfRows[symbol].price = price ?? null;
+    asOfRows[symbol].asOfDate = body.asOfDates?.[symbol] || null;
+    renderAsOfResults(asOfRequestedDate);
+    if (price == null) toast(`No PSX price found for ${symbol} — enter it manually`, 'warning');
+  } catch (e) {
+    toast(`Could not look up ${symbol}'s price — enter it manually`, 'warning');
+  }
 }
 
 // Exports the currently-calculated "as of" report - handy for attaching to a yearly
@@ -3334,8 +3487,9 @@ function exportAsOfCSV() {
       row.price != null ? value.toFixed(2) : ''
     ];
   });
+  const ownerLine = state.settings.ownerName ? [[`Portfolio Owner: ${csvSafe(state.settings.ownerName)}`]] : [];
   const headerLines = [
-    [`Portfolio Value As Of: ${asOfRequestedDate}`], []
+    [`Portfolio Value As Of: ${asOfRequestedDate}`], ...ownerLine, []
   ];
   const totalLine = [[], ['', '', '', 'Total', total.toFixed(2)]];
   const csv = [...headerLines, headers, ...rows, ...totalLine].map(r => r.join(',')).join('\n');
@@ -3347,6 +3501,98 @@ function exportAsOfCSV() {
   a.click();
   URL.revokeObjectURL(url);
   toast(`Exported valuation for ${symbols.length} symbols`, 'success');
+}
+
+// Same report as exportAsOfCSV, as a real .xlsx workbook (via SheetJS, loaded in <head>)
+// rather than a CSV - the point of the whole report is attaching it to a tax return, and
+// an actual Excel file with the total sitting at the bottom of a real column reads
+// better for that than a comma-separated text file, even though most spreadsheet apps
+// open the CSV just fine too.
+function exportAsOfExcel() {
+  const symbols = Object.keys(asOfRows);
+  if (symbols.length === 0) {
+    toast('Calculate a valuation first', 'warning');
+    return;
+  }
+  if (typeof XLSX === 'undefined') {
+    toast('Excel export library failed to load — try Export CSV instead', 'error');
+    return;
+  }
+
+  const aoa = [[`Portfolio Value As Of: ${asOfRequestedDate}`]];
+  if (state.settings.ownerName) aoa.push([`Portfolio Owner: ${state.settings.ownerName}`]);
+  aoa.push([`Generated: ${new Date().toISOString().split('T')[0]}`], []);
+  aoa.push(['Symbol', 'Shares', 'Price', 'Priced As Of', 'Value']);
+
+  let total = 0;
+  for (const sym of symbols.sort()) {
+    const row = asOfRows[sym];
+    const value = row.price != null ? row.shares * row.price : 0;
+    total += value;
+    aoa.push([sym, row.shares, row.price ?? '', row.asOfDate || '', row.price != null ? Number(value.toFixed(2)) : '']);
+  }
+  aoa.push([], ['', '', '', 'Total', Number(total.toFixed(2))]);
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 14 }, { wch: 16 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'Portfolio Value');
+  XLSX.writeFile(wb, `psx-portfolio-value-${asOfRequestedDate}.xlsx`);
+  toast(`Exported valuation for ${symbols.length} symbols to Excel`, 'success');
+}
+
+// Renders the report into #asOfPrintArea (a hidden div that's a direct child of <body>,
+// see the print CSS in <style>) and triggers the browser print dialog. Built fresh into
+// plain, light-background HTML each time rather than printing the live (possibly dark-
+// themed, editable-input-filled) table directly, since a printed tax attachment should
+// look like a document, not a screenshot of the app's edit UI.
+function printAsOf() {
+  const symbols = Object.keys(asOfRows);
+  if (symbols.length === 0) {
+    toast('Calculate a valuation first', 'warning');
+    return;
+  }
+
+  let total = 0;
+  const rowsHtml = symbols.sort().map(sym => {
+    const row = asOfRows[sym];
+    const value = row.price != null ? row.shares * row.price : 0;
+    total += value;
+    return `<tr>
+      <td style="padding:4px;border-bottom:1px solid #ddd">${escapeHtml(sym)}</td>
+      <td style="padding:4px;border-bottom:1px solid #ddd;text-align:right">${row.shares.toLocaleString('en-PK', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>
+      <td style="padding:4px;border-bottom:1px solid #ddd;text-align:right">${row.price != null ? fPKR(row.price) : '—'}</td>
+      <td style="padding:4px;border-bottom:1px solid #ddd">${escapeHtml(row.asOfDate || '')}</td>
+      <td style="padding:4px;border-bottom:1px solid #ddd;text-align:right">${row.price != null ? fPKR(value) : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  document.getElementById('asOfPrintArea').innerHTML = `
+    <h1 style="font-size:18px;margin:0 0 4px">Portfolio Value As Of ${escapeHtml(asOfRequestedDate)}</h1>
+    ${state.settings.ownerName ? `<div style="font-size:12px;margin-bottom:2px">Owner: ${escapeHtml(state.settings.ownerName)}</div>` : ''}
+    <div style="font-size:11px;color:#555;margin-bottom:16px">Generated ${new Date().toISOString().split('T')[0]}</div>
+    <table>
+      <thead><tr style="border-bottom:2px solid #000">
+        <th style="text-align:left;padding:4px">Symbol</th>
+        <th style="text-align:right;padding:4px">Shares</th>
+        <th style="text-align:right;padding:4px">Price</th>
+        <th style="text-align:left;padding:4px">Priced As Of</th>
+        <th style="text-align:right;padding:4px">Value (PKR)</th>
+      </tr></thead>
+      <tbody>${rowsHtml}</tbody>
+      <tfoot><tr style="border-top:2px solid #000;font-weight:700">
+        <td colspan="4" style="padding:6px 4px">Total Portfolio Value</td>
+        <td style="text-align:right;padding:6px 4px">${fPKR(total)}</td>
+      </tr></tfoot>
+    </table>`;
+
+  document.body.classList.add('printing-asof');
+  const cleanup = () => {
+    document.body.classList.remove('printing-asof');
+    window.removeEventListener('afterprint', cleanup);
+  };
+  window.addEventListener('afterprint', cleanup);
+  window.print();
 }
 
 /* ══════════════════════════════════════════════════════
@@ -9525,5 +9771,9 @@ async function init() {
 
 document.addEventListener('DOMContentLoaded', init);
 </script>
+<!-- Built on demand by printAsOf() and otherwise empty/hidden - see the print CSS in
+     <style> for how this is the only thing left visible when printing. Must stay a
+     direct child of <body>, not nested inside any view/section, for that CSS to work. -->
+<div id="asOfPrintArea"></div>
 </body>
 </html>
