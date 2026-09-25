@@ -3842,11 +3842,20 @@ async function fetchWithProxy(url, proxyIdx = 0) {
 }
 
 // Returns { ok, results } - `ok` is true whenever a proxy successfully fetched and
-// parsed a real market-watch table, REGARDLESS of whether any of the requested symbols
-// had a matching row. market-watch only lists symbols that actually traded in the
-// current session (e.g. ~494 of PSX's ~757 listed equities on a quiet day) - a thinly
-// traded stock with zero matches is a completely different situation from the proxy/
-// network failing outright, and the caller needs to tell them apart to message honestly.
+// parsed a real per-symbol table, REGARDLESS of whether any of the requested symbols
+// had a matching row. A thinly traded/delisted symbol with zero matches is a completely
+// different situation from the proxy/network failing outright, and the caller needs to
+// tell them apart to message honestly.
+//
+// PSX retired dps.psx.com.pk/market-watch (the classic live trading-ticker table: LDCP/
+// Open/High/Low/Current/Change/Volume) at some point after 2026-08-05 - the backend now
+// serves /screener's HTML here instead (see its comment in Program.cs), which is a
+// valuation screener, NOT a trading ticker: it has no LDCP/Open/High/Low/session-volume
+// columns at all, only Symbol/Sector/Listed In/Market Cap/Price/Change(%)/1-Year
+// Change/PE/Dividend Yield/Free Float/30D Avg Volume (confirmed against the live page's
+// own <thead>, data-name attributes match 1:1 with this column order). High/Low are
+// simply unavailable now - callers already null-guard both (see the "Day: X-Y" badges),
+// so this only means that badge stops appearing, nothing crashes.
 function parseMarketWatchHtml(html, wanted) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
   const rows = doc.querySelectorAll('table.tbl tbody tr');
@@ -3854,21 +3863,23 @@ function parseMarketWatchHtml(html, wanted) {
   const results = {};
   for (const row of rows) {
     const cells = row.querySelectorAll('td');
-    if (cells.length < 10) continue;
-    const sym = (cells[0].getAttribute('data-search') || cells[0].textContent).trim().toUpperCase();
+    if (cells.length < 6) continue;
+    const sym = (cells[0].getAttribute('data-order') || cells[0].textContent).trim().toUpperCase();
     if (!wanted.has(sym)) continue;
-    // Columns confirmed against the live page's own <thead>: SYMBOL/SECTOR/LISTED IN/
-    // LDCP/OPEN/HIGH/LOW/CURRENT/CHANGE/CHANGE(%)/VOLUME - High/Low are today's
-    // session range, same data-order convention as price/change.
-    const high = parseFloat(cells[5].getAttribute('data-order'));
-    const low = parseFloat(cells[6].getAttribute('data-order'));
-    const price = parseFloat(cells[7].getAttribute('data-order'));
-    const change = parseFloat(cells[8].getAttribute('data-order'));
-    const changePct = parseFloat(cells[9].getAttribute('data-order'));
+    const price = parseFloat(cells[4].getAttribute('data-order'));
+    const changePct = parseFloat(cells[5].getAttribute('data-order'));
     if (price > 0) {
+      // No absolute rupee change column here (unlike the old market-watch table) - only
+      // percent change. Derived from price/changePct instead of dropping it to 0, since
+      // getEnrichedHoldings multiplies this by shares held for each position's "today's
+      // P&L" (dayChange) - previousClose = price / (1 + changePct/100), change = the
+      // difference. Guarded against a -100% change (previousClose would be 0, dividing
+      // by zero) - not realistic for a real trade but cheap to not crash on.
+      const denom = 1 + (changePct || 0) / 100;
+      const change = denom !== 0 ? price - price / denom : 0;
       results[sym] = {
-        price, change: change || 0, changePct: changePct || 0,
-        high: high > 0 ? high : null, low: low > 0 ? low : null,
+        price, change, changePct: changePct || 0,
+        high: null, low: null,
         status: 'live', updatedAt: Date.now()
       };
     }

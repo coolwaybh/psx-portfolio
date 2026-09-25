@@ -537,16 +537,31 @@ prices.MapPost("/history", async (PriceHistoryRequest req, PsxHistoricalPriceSer
     return Results.Ok(result);
 });
 
-// Server-side pass-through for PSX's live market-watch page - see the AddHttpClient()
+// Server-side pass-through for PSX's per-symbol price table - see the AddHttpClient()
 // comment above for why this exists instead of the client fetching it directly via a
-// third-party CORS proxy. Returns the raw HTML unchanged; the frontend's existing
-// DOMParser-based table parsing (fetchPSXMarketWatch) is untouched, only the URL it
-// fetches from changed. Fetch/fallback logic lives in PsxHtmlFetcher.
+// third-party CORS proxy. Route path kept as /market-watch (our own API's name, not
+// PSX's) even though it now fetches PSX's /screener page - see the fetch target comment
+// below for why. Returns the raw HTML unchanged; the frontend's DOMParser-based table
+// parsing (parseMarketWatchHtml in index.html) matches whichever page this fetches.
+// Fetch/fallback logic lives in PsxHtmlFetcher.
 prices.MapGet("/market-watch", async (IHttpClientFactory httpFactory) =>
 {
     var client = httpFactory.CreateClient();
-    client.Timeout = TimeSpan.FromSeconds(20);
-    var html = await PsxHtmlFetcher.FetchAsync(client, "market-watch");
+    // Bigger page than /indices (~700KB vs ~55KB) - confirmed to still fetch in a few
+    // seconds direct from PSX, but given the extra margin room here rather than reusing
+    // the same 20s budget /indices uses.
+    client.Timeout = TimeSpan.FromSeconds(25);
+    // PSX retired dps.psx.com.pk/market-watch at some point after 2026-08-05 (the last
+    // time this was confirmed working) - it now 404s for real (PSX's own generic SPA
+    // "not found" shell, confirmed by curling it directly: not a WAF block, the route is
+    // genuinely gone), which is why stock prices could go stale indefinitely while the
+    // KSE-100 index (still a live page, /indices) kept updating fine. /screener is a
+    // still-live, still-server-rendered page covering every listed symbol with the same
+    // data-order-per-cell table convention, so it's used here as the replacement data
+    // source - see parseMarketWatchHtml's comment for the very different column layout
+    // this actually requires on the parsing side (it's a valuation screener, not a
+    // trading ticker: no LDCP/Open/High/Low/session-volume columns exist here at all).
+    var html = await PsxHtmlFetcher.FetchAsync(client, "screener");
     return html is not null ? Results.Content(html, "text/html") : Results.StatusCode(StatusCodes.Status502BadGateway);
 });
 
