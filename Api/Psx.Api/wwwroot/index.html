@@ -1200,7 +1200,7 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
       <div class="section-title">Mutual Funds <span class="badge" id="fundCount">0</span></div>
       <div style="display:flex;gap:8px">
         <input type="file" id="fundPdfImportInput" accept="application/pdf" style="display:none" onchange="handleFundPdfFileSelected(event)">
-        <button class="btn btn-sm" title="Reliably parses UBL Fund Managers / Al-Ameen's &quot;Portfolio Statement with Investment Cost&quot; only. Other statements may not parse - use + Add Opening Position instead." onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
+        <button class="btn btn-sm" title="Reliably parses UBL Fund Managers / Al-Ameen's &quot;Portfolio Statement with Investment Cost&quot;, plain Consolidated Statement, and per-transaction &quot;Your Transaction Statement&quot;. Other AMCs' statements may not parse - use + Add Opening Position instead." onclick="document.getElementById('fundPdfImportInput').click()">⬆ Import from PDF</button>
         <button class="btn btn-sm" id="syncMufapNavsBtn" onclick="syncMufapNavs(false, true)">⇩ Sync NAVs from MUFAP</button>
         <button class="btn btn-sm" onclick="openNavUpdateModal()">↻ Update NAVs</button>
         <button class="btn btn-sm" onclick="openModalForOpeningPositionFund()">+ Add Opening Position</button>
@@ -1208,7 +1208,7 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
       </div>
     </div>
     <div style="font-size:11px;color:var(--txt3);margin:-4px 0 14px">
-      PDF import reliably parses UBL Fund Managers / Al-Ameen's own "Portfolio Statement with Investment Cost" (the one showing your actual purchase cost, not just today's value). Any other AMC's statement — or Al-Ameen's plain Consolidated Statement without cost — may not parse correctly; use <strong>+ Add Opening Position</strong> to enter those by hand instead.
+      PDF import reliably parses UBL Fund Managers / Al-Ameen's own "Portfolio Statement with Investment Cost" (the one showing your actual purchase cost, not just today's value), its plain Consolidated Statement, and its per-transaction "Your Transaction Statement" (posts each row as a real dated transaction instead of a single opening position). Any other AMC's statement may not parse correctly; use <strong>+ Add Opening Position</strong> to enter those by hand instead.
     </div>
 
     <div class="kpi-grid" style="padding:0 0 20px" id="fundKpiGrid">
@@ -9144,13 +9144,16 @@ async function deleteFundTransaction(id) {
 }
 
 /* ══════════════════════════════════════════════════════
-   FUND PDF IMPORT — parses a UBL/Al-Ameen portfolio statement (POST
-   /api/funds/import/pdf) into candidate opening positions, then walks the user
-   through them one at a time. Mirrors the ledger's pdfImport* wizard (see
-   handlePdfFileSelected et al.) - a separate copy rather than a shared one because
-   the two review different fields (fund+units+NAV vs symbol+shares+price+commission)
-   and each confirmed row here is submitted as an opening position (0% load, no cash
-   entry - see setFundOpeningModeUI), not a regular transaction.
+   FUND PDF IMPORT — parses a UBL/Al-Ameen portfolio or transaction statement (POST
+   /api/funds/import/pdf) into candidates, then walks the user through them one at a
+   time. Mirrors the ledger's pdfImport* wizard (see handlePdfFileSelected et al.) - a
+   separate copy rather than a shared one because the two review different fields
+   (fund+units+NAV vs symbol+shares+price+commission). A candidate from either
+   snapshot-format parser (FundStatementParser/FundCostStatementParser) has no txType
+   and is submitted as an opening position (0% load, no cash entry - see
+   setFundOpeningModeUI); a candidate from UblTransactionStatementParser carries a real
+   txType and is submitted as an actual dated Buy/Sell/DividendReinvest transaction
+   instead - see the branch in fundPdfImportConfirm().
 ══════════════════════════════════════════════════════ */
 let fundPdfImportCandidates = [];
 let fundPdfImportIndex = 0;
@@ -9182,7 +9185,7 @@ async function handleFundPdfFileSelected(event) {
 
     if (!body.candidates || body.candidates.length === 0) {
       if (!body.warnings || body.warnings.length === 0) {
-        toast('No fund holdings found in this PDF', 'warning');
+        toast('No fund holdings or transactions found in this PDF', 'warning');
       }
       return;
     }
@@ -9216,7 +9219,15 @@ async function handleFundPdfFileSelected(event) {
 // user to fill by hand even though the statement was recognized and its numbers parsed
 // fine (those come from a separate regex, unaffected by this).
 function normalizeFundName(name) {
-  return name.replace(/\([A-Z0-9]+\)\s*$/, '').trim().toLowerCase().replace(/[-\s]+/g, ' ');
+  return name
+    .replace(/\([A-Z0-9]+\)\s*$/, '')
+    // UblTransactionStatementParser's fund names carry a trailing "- Class 'C'" (the
+    // per-transaction statement names a share class; AMC_FUNDS/the user's own saved
+    // funds don't) - strip it the same way the ABBR suffix above is stripped, so this
+    // format matches an existing fund instead of always falling through to "+ Add New
+    // Fund…".
+    .replace(/-\s*Class\s*['"]?[A-Za-z0-9]+['"]?\s*$/i, '')
+    .trim().toLowerCase().replace(/[-\s]+/g, ' ');
 }
 
 function matchFundCandidate(candidate) {
@@ -9255,9 +9266,10 @@ function renderFundPdfImportStep() {
   const marketPriceNote = c.marketPrice != null
     ? ` · Market price ${fNum(c.marketPrice)} will also be set as the fund's current NAV, so unrealized gain/loss is correct right away.`
     : '';
+  const typeNote = c.txType ? ` [${c.txType === 'DividendReinvest' ? 'Dividend Re-invest' : c.txType}]` : '';
   document.getElementById('pfSourceRow').textContent = (match.existingFundId || match.amc
-    ? `From statement: "${c.schemeNameRaw}"${c.unitType ? ` (${c.unitType})` : ''}`
-    : `⚠ From statement: "${c.schemeNameRaw}"${c.unitType ? ` (${c.unitType})` : ''} — couldn't match to a known fund, please pick or add one below.`) + marketPriceNote;
+    ? `From statement: "${c.schemeNameRaw}"${c.unitType ? ` (${c.unitType})` : ''}${typeNote}`
+    : `⚠ From statement: "${c.schemeNameRaw}"${c.unitType ? ` (${c.unitType})` : ''}${typeNote} — couldn't match to a known fund, please pick or add one below.`) + marketPriceNote;
 
   document.getElementById('pfFundPicker').innerHTML =
     '<option value="">Select a fund</option>' +
@@ -9292,7 +9304,7 @@ function renderFundPdfImportStep() {
   document.getElementById('pfUnits').value = c.units;
   document.getElementById('pfNav').value = c.unitPrice;
   document.getElementById('pfDate').value = c.asOfDate || new Date().toISOString().split('T')[0];
-  document.getElementById('pfNotes').value = 'Opening position — imported from portfolio statement';
+  document.getElementById('pfNotes').value = c.notes || 'Opening position — imported from portfolio statement';
 
   document.getElementById('pfPrevBtn').disabled = fundPdfImportIndex === 0;
 }
@@ -9360,7 +9372,7 @@ function fundPdfImportAdvanceOrFinish() {
   }
   if (fundPdfImportActedOn.size >= fundPdfImportCandidates.length) {
     closeFundPdfImport();
-    toast(`Imported ${fundPdfImportConfirmedCount} of ${fundPdfImportCandidates.length} fund holdings from PDF`, 'success');
+    toast(`Imported ${fundPdfImportConfirmedCount} of ${fundPdfImportCandidates.length} rows from PDF`, 'success');
     return;
   }
   const earlier = fundPdfImportCandidates.findIndex((_, i) => !fundPdfImportActedOn.has(i));
@@ -9432,14 +9444,30 @@ async function fundPdfImportConfirm() {
       fundId = fund.id;
     }
 
-    const res = await fetch('/api/funds/transactions/buy', {
+    // UblTransactionStatementParser candidates carry a real txType (Buy/Sell/
+    // DividendReinvest/DividendCash) and post as an actual dated transaction through the
+    // matching endpoint; the two snapshot-format parsers leave txType unset, which keeps
+    // the original "opening position" convention (always Buy, 0% load).
+    const txType = c.txType || 'Buy';
+    if (txType === 'DividendCash') {
+      toast('Cash dividends can\'t be imported this way — click Skip and add this one manually via Add Transaction.', 'warning');
+      return;
+    }
+    const endpoint = txType === 'DividendReinvest' ? '/api/funds/transactions/dividend'
+      : txType === 'Sell' ? '/api/funds/transactions/sell'
+      : '/api/funds/transactions/buy';
+    const txBody = txType === 'DividendReinvest' ? { fundId, date, type: 'reinvest', units, nav, notes }
+      : txType === 'Sell' ? { fundId, date, units, nav, backLoadPct: 0, cgtAmount: 0, notes }
+      : { fundId, date, units, nav, frontLoadPct: 0, notes };
+
+    const res = await fetch(endpoint, {
       method: 'POST', credentials: 'include',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ fundId, date, units, nav, frontLoadPct: 0, notes })
+      body: JSON.stringify(txBody)
     });
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
-      toast(err.error || 'Could not add opening position', 'error');
+      toast(err.error || 'Could not add transaction', 'error');
       return;
     }
     const tx = await res.json();

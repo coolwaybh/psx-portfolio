@@ -11,10 +11,16 @@ namespace Psx.Api.Services;
 // FundCostStatementParser). A non-null MarketPrice tells the frontend to also push a
 // NAV update after the opening position is created, so unrealized gain/loss shows
 // correctly right away instead of reading zero until the next manual NAV refresh.
+// TxType/TxDate/Notes are set only by a discrete-transaction parser (see
+// UblTransactionStatementParser) - null for the two holdings-snapshot parsers above, which the
+// frontend takes as the existing "opening position" convention (a single Buy dated AsOfDate).
+// When TxType is set, the frontend instead posts a real transaction dated TxDate through the
+// matching endpoint (buy/sell/dividend) - see fundPdfImportConfirm() in wwwroot/index.html.
 public record ParsedFundHoldingCandidate(
     string SchemeNameRaw, string SchemeAbbr, string UnitType,
     decimal Units, decimal UnitPrice, decimal InvestmentValue, string AsOfDate,
-    decimal? MarketPrice = null);
+    decimal? MarketPrice = null,
+    string? TxType = null, string? TxDate = null, string? Notes = null);
 
 public record FundStatementParseResult(List<ParsedFundHoldingCandidate> Candidates, List<string> Warnings);
 

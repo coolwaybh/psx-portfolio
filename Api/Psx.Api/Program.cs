@@ -1069,16 +1069,20 @@ funds.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
     return Results.Ok(new { deleted = count });
 });
 
-// Parses a portfolio/pension statement PDF into candidate opening positions for the user
-// to review one-by-one - this endpoint never saves anything itself, same contract as
-// POST /api/ledger/import/pdf. Three statement formats are recognized (see
-// FundStatementParser, FundCostStatementParser, and FaysalPensionStatementParser) - tried
-// in turn, first one to return any candidates wins, since a PDF can only match one
-// format's anchor text. The frontend posts each confirmed candidate as a normal Buy (0%
-// load - see setFundOpeningModeUI), creating the fund first if it doesn't exist yet, and -
-// when the candidate carries a MarketPrice (the Investment Cost format only) - also
-// pushes a NAV update so unrealized gain/loss is correct immediately. The uploaded file
-// is never persisted to disk.
+// Parses a portfolio/pension/transaction statement PDF into candidates for the user to
+// review one-by-one - this endpoint never saves anything itself, same contract as
+// POST /api/ledger/import/pdf. Four statement formats are recognized (see
+// FundStatementParser, FundCostStatementParser, FaysalPensionStatementParser, and
+// UblTransactionStatementParser) - tried in turn, first one to return any candidates
+// wins, since a PDF can only match one format's anchor text. For the three
+// snapshot-style parsers, the frontend posts each confirmed candidate as a normal Buy
+// (0% load - see setFundOpeningModeUI), creating the fund first if it doesn't exist yet,
+// and - when the candidate carries a MarketPrice (the Investment Cost format only) -
+// also pushes a NAV update so unrealized gain/loss is correct immediately.
+// UblTransactionStatementParser's candidates instead carry a real TxType/TxDate and are
+// posted as an actual dated transaction (buy/sell/dividend) - see
+// ParsedFundHoldingCandidate's own doc comment. The uploaded file is never persisted to
+// disk.
 funds.MapPost("/import/pdf", async (IFormFile file) =>
 {
     const long MaxFileSizeBytes = 5 * 1024 * 1024;
@@ -1104,6 +1108,12 @@ funds.MapPost("/import/pdf", async (IFormFile file) =>
             buffer.Position = 0;
             var pensionResult = FaysalPensionStatementParser.Parse(buffer);
             if (pensionResult.Candidates.Count > 0) result = pensionResult;
+        }
+        if (result.Candidates.Count == 0)
+        {
+            buffer.Position = 0;
+            var txResult = UblTransactionStatementParser.Parse(buffer);
+            if (txResult.Candidates.Count > 0) result = txResult;
         }
     }
     catch (Exception ex)
