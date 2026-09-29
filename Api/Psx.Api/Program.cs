@@ -36,6 +36,8 @@ builder.Services.AddMemoryCache();
 builder.Services.AddScoped<FundamentalAnalysisService>();
 builder.Services.AddScoped<MufapNavSyncService>();
 builder.Services.AddHostedService<MufapNavDailySyncWorker>();
+builder.Services.AddSingleton<PsxDayRangeCache>();
+builder.Services.AddHostedService<PsxDayRangeRefreshWorker>();
 
 builder.Services.AddHttpClient<PsxHistoricalPriceService>(client =>
 {
@@ -573,6 +575,20 @@ prices.MapGet("/indices", async (IHttpClientFactory httpFactory) =>
     client.Timeout = TimeSpan.FromSeconds(20);
     var html = await PsxHtmlFetcher.FetchAsync(client, "indices");
     return html is not null ? Results.Content(html, "text/html") : Results.StatusCode(StatusCodes.Status502BadGateway);
+});
+
+// Today's intraday High/Low per symbol - see PsxDayRangeCache/PsxDayRangeRefreshWorker's
+// comments for why this is a slowly-refreshed server-side cache (one symbol scraped
+// every few seconds, forever) rather than a live per-request fetch: /market-watch used
+// to carry this in one bulk table, but it (and /timeseries/eod) are both genuinely gone
+// now, and the only remaining source is a per-symbol page - fetching that N-at-once on
+// the frontend's existing 15s price-refresh tick would multiply PSX's request load by
+// however many symbols are held. Returns whatever's cached, however old - same
+// stale-beats-nothing convention as the other price sources here.
+prices.MapGet("/day-range", (PsxDayRangeCache cache) =>
+{
+    var result = cache.Snapshot().ToDictionary(kv => kv.Key, kv => new { high = kv.Value.High, low = kv.Value.Low });
+    return Results.Ok(result);
 });
 
 // Total market-wide shares/value traded today - not on dps.psx.com.pk (neither

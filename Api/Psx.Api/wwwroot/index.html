@@ -3984,6 +3984,20 @@ async function fetchPSXMarketSummary() {
   return null;
 }
 
+// Reads PsxDayRangeCache's server-side cache (see its own comment for why this is a
+// slowly-refreshed cache rather than a live fetch) - cheap to call on every 15s refresh
+// tick since it never itself triggers a PSX request, just returns whatever the
+// background worker has accumulated so far. A symbol not yet in the cache (freshly
+// added, or the worker hasn't reached it yet this cycle) simply keeps high/low null,
+// same as before this feature existed - renderMktPriceCell already handles that.
+async function fetchPSXDayRange() {
+  try {
+    const res = await fetch('/api/prices/day-range', { credentials: 'include', signal: AbortSignal.timeout(10000) });
+    if (res.ok) return await res.json();
+  } catch(e) { /* falls back to plain price rendering - not worth retrying harder */ }
+  return null;
+}
+
 // ── MARKET STATUS (Open / Closed / Holiday) ─────────────────────
 // Pure client-side clock check against PSX's published trading calendar - PSX's
 // scraped pages (indices/market-watch) carry no session-state field of their own
@@ -5139,6 +5153,17 @@ async function refreshPrices(silent = false) {
       for (const [sym, d] of Object.entries(bulk)) {
         state.prices[sym] = d;
         fetched++;
+      }
+    } catch(e) {}
+
+    // Merge in today's High/Low from the separate, slowly-refreshed day-range cache -
+    // see fetchPSXDayRange()'s comment. Only touches high/low, never price/change/status.
+    try {
+      const dayRange = await fetchPSXDayRange();
+      if (dayRange) {
+        for (const [sym, r] of Object.entries(dayRange)) {
+          if (state.prices[sym]) { state.prices[sym].high = r.high; state.prices[sym].low = r.low; }
+        }
       }
     } catch(e) {}
 
