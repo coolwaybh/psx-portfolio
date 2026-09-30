@@ -1414,17 +1414,19 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         // out of sync with each other. GrossAmount keeps the precise (possibly
         // fractional) declared figure, but the actual cash movement - tax withheld
         // and net credited - is always whole rupees in practice (CDC/bank transfers
-        // don't move paisas), so both are rounded to 0dp here. Rounding the tax
-        // first and deriving Amount = Gross - tax (rather than rounding each
-        // independently) keeps them tied to Gross exactly: whole-rupee rounding is
-        // shift-invariant, so (Gross - tax) rounds to (round(Gross) - tax) - meaning
-        // tax + Amount always equals Gross rounded to the nearest rupee, and any
-        // downstream display that re-derives tax as GrossAmount - Amount and rounds
-        // it will reconstruct this same whole tax value.
+        // don't move paisas), so both are floored to 0dp here - CDC's own practice is
+        // to always round DOWN to the nearest rupee when crediting (confirmed against
+        // real payout notices; e.g. a precise 1,376.50 net is credited as 1,376, never
+        // 1,377), never round-half-up. Flooring the tax first and deriving
+        // Amount = Gross - tax (rather than flooring each independently) keeps them
+        // tied to Gross exactly: floor is shift-invariant, so floor(Gross - tax) =
+        // floor(Gross) - tax (tax already an integer) - meaning tax + Amount always
+        // equals floor(Gross), and any downstream display that re-derives tax as
+        // GrossAmount - Amount and rounds it will reconstruct this same whole tax value.
         grossAmount = gross;
         taxRatePct = rate;
-        var taxWhole = Math.Round(gross * rate / 100m, 0, MidpointRounding.AwayFromZero);
-        amount = Math.Round(gross - taxWhole, 0, MidpointRounding.AwayFromZero);
+        var taxWhole = Math.Floor(gross * rate / 100m);
+        amount = Math.Floor(gross - taxWhole);
     }
     else if (type == CashType.Deposit && req.CdcHoldAmount is decimal hold)
     {
