@@ -7065,11 +7065,12 @@ function updateDividendNetPreview() {
   }
   // Whole-rupee tax/net, matching the server's Amount computation exactly (see the
   // note in Program.cs's cash-entry endpoint) - Gross Amount itself stays precise
-  // (2dp) as entered/declared. Floored, not rounded-to-nearest: CDC always credits
-  // the lower whole rupee.
+  // (2dp) as entered/declared. Rounds to nearest, but an exact .50 tie breaks DOWN
+  // (matches .NET's MidpointRounding.ToZero) rather than up like JS's own Math.round.
   const rate = parseFloat(document.getElementById('cfTaxRatePct').value) || 0;
-  const taxWhole = Math.floor(gross * rate / 100);
-  const net = Math.floor(gross - taxWhole);
+  const roundToZeroMidpoint = v => (v % 1 === 0.5 || v % 1 === -0.5) ? Math.trunc(v) : Math.round(v);
+  const taxWhole = roundToZeroMidpoint(gross * rate / 100);
+  const net = roundToZeroMidpoint(gross - taxWhole);
   document.getElementById('cfTaxPreview').textContent = `PKR ${fPKR0(taxWhole)}`;
   document.getElementById('cfNetPreview').textContent = `PKR ${fPKR0(net)}`;
 }
