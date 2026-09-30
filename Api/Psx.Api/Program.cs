@@ -1360,6 +1360,15 @@ static bool TryBuildEntry(LedgerCreateRequest req, int userId, out LedgerEntry e
     return true;
 }
 
+// Round to the nearest whole number, except an exact .50 fraction breaks DOWN
+// instead of up - see the comment at its one call site (dividend tax/net rounding)
+// for why none of Math.Round's built-in MidpointRounding values do this.
+static decimal RoundTiesDown(decimal value)
+{
+    var floor = Math.Floor(value);
+    return value - floor > 0.5m ? floor + 1m : floor;
+}
+
 static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry entry, out string error)
 {
     entry = null!;
@@ -1416,22 +1425,24 @@ static bool TryBuildCashEntry(CashCreateRequest req, int userId, out CashEntry e
         // and net credited - is always whole rupees in practice (CDC/bank transfers
         // don't move paisas), so both are rounded to 0dp here. CDC rounds to the
         // NEAREST rupee normally (e.g. 242.775 -> 243), but an exact .50 tie breaks
-        // DOWN instead of up (confirmed against real payout notices) - that's
-        // MidpointRounding.ToZero, not AwayFromZero (which this used before and
-        // over-credited by 1 on an exact tie) and not a plain floor (which
-        // under-rounds every non-tie fraction below .50, e.g. would take 242.3 down
-        // to 242 - correct here, but would also wrongly take 242.775 down to 242
-        // instead of up to 243). Rounding the tax first and deriving
-        // Amount = Gross - tax (rather than rounding each independently) keeps them
-        // tied to Gross exactly: ToZero rounding is shift-invariant like any other
-        // MidpointRounding mode, so round(Gross - tax) = round(Gross) - tax (tax
-        // already an integer) - meaning tax + Amount always equals round(Gross), and
-        // any downstream display that re-derives tax as GrossAmount - Amount and
-        // rounds it will reconstruct this same whole tax value.
+        // DOWN instead of up (confirmed against real payout notices). No built-in
+        // MidpointRounding value does this - AwayFromZero breaks every tie UP, and
+        // the "ToZero"/"ToNegativeInfinity" family confusingly doesn't mean "normal
+        // rounding, ties toward X" at all - it truncates/floors EVERY value
+        // unconditionally, tie or not (verified: Math.Round(242.775m, 0, ToZero) is
+        // 242, not 243 - silently wrong for any non-tie fraction below the whole
+        // rupee). RoundTiesDown below is hand-rolled specifically to get normal
+        // nearest-rounding with only the exact .50 case forced down. Rounding the
+        // tax first and deriving Amount = Gross - tax (rather than rounding each
+        // independently) keeps them tied to Gross exactly: this rounding is
+        // shift-invariant like Math.Round, so round(Gross - tax) = round(Gross) -
+        // tax (tax already an integer) - meaning tax + Amount always equals
+        // round(Gross), and any downstream display that re-derives tax as
+        // GrossAmount - Amount and rounds it will reconstruct this same whole tax value.
         grossAmount = gross;
         taxRatePct = rate;
-        var taxWhole = Math.Round(gross * rate / 100m, 0, MidpointRounding.ToZero);
-        amount = Math.Round(gross - taxWhole, 0, MidpointRounding.ToZero);
+        var taxWhole = RoundTiesDown(gross * rate / 100m);
+        amount = RoundTiesDown(gross - taxWhole);
     }
     else if (type == CashType.Deposit && req.CdcHoldAmount is decimal hold)
     {
