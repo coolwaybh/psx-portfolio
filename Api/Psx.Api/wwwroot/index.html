@@ -5963,7 +5963,7 @@ function computeSymbolDetail(symbol) {
   const history = [
     ...state.transactions.filter(t => t.symbol === sym).map(t => ({ kind: 'ledger', ...t })),
     ...dividendEntries.map(c => ({ kind: 'dividend', id: c.id, type: 'dividend', date: c.date, amount: c.amount, notes: c.notes }))
-  ].sort((a,b) => new Date(b.date) - new Date(a.date) || b.id - a.id);
+  ].sort((a,b) => new Date(b.date) - new Date(a.date) || a.id - b.id);
 
   return { symbol: sym, realized, holding, dividends, totalReturn, history };
 }
@@ -6318,7 +6318,11 @@ function renderCashLedger() {
     return;
   }
 
-  const newestFirst = [...inPeriod].sort((a,b) => new Date(b.date) - new Date(a.date) || b.id - a.id);
+  // Newest DATE first, but within one date, ascending by id (transaction number) -
+  // so same-day entries read in the order they actually happened (e.g. a Dividend's
+  // auto-created offsetting Withdrawal, inserted a moment later, shows below it, not
+  // above it).
+  const newestFirst = [...inPeriod].sort((a,b) => new Date(b.date) - new Date(a.date) || a.id - b.id);
   const showAll = state.ui.showAllCash;
   const displayed = showAll ? newestFirst : newestFirst.slice(0, ROW_LIMIT);
 
@@ -6408,7 +6412,7 @@ function renderCgtLedger() {
     return;
   }
 
-  const newestFirst = [...inPeriod].sort((a,b) => new Date(b.date) - new Date(a.date) || String(b.id).localeCompare(String(a.id)));
+  const newestFirst = [...inPeriod].sort((a,b) => new Date(b.date) - new Date(a.date) || String(a.id).localeCompare(String(b.id)));
   const showAll = state.ui.showAllCgt;
   const displayed = showAll ? newestFirst : newestFirst.slice(0, ROW_LIMIT);
 
@@ -8395,7 +8399,7 @@ function renderFundsView() {
     }).join('');
   }
 
-  const transactions = [...state.funds.transactions].sort((a, b) => new Date(b.date) - new Date(a.date) || b.id - a.id);
+  const transactions = [...state.funds.transactions].sort((a, b) => new Date(b.date) - new Date(a.date) || a.id - b.id);
   setText('fundTxCount', transactions.length);
 
   const txTbody = document.getElementById('fundTxTbody');
