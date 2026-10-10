@@ -716,6 +716,66 @@ fundamental.MapPost("/{symbol}/refresh", async (string symbol, ClaimsPrincipal p
     return Results.Ok(FundamentalViewDto.From(view));
 });
 
+// ── TECHNICAL VIEW ────────────────────────────────────────────────────
+// Deterministic - see TechnicalAnalysisService's own comment. Computed fresh on every
+// request (it's plain arithmetic over already-cached EodPrice rows, not an external
+// call), so unlike /api/fundamental there's no cache table and no rate limit here.
+var technical = app.MapGroup("/api/technical").RequireAuthorization();
+
+technical.MapGet("/{symbol}", async (string symbol, PsxHistoricalPriceService priceSvc) =>
+{
+    var sym = symbol.Trim().ToUpperInvariant();
+    if (!IsValidSymbol(sym)) return Results.BadRequest(new { error = "Invalid symbol." });
+
+    var history = await priceSvc.GetFullHistory(sym);
+    var result = TechnicalAnalysisService.Analyze(history);
+    if (result is null) return Results.NotFound(new { error = "No price history available for this symbol." });
+
+    return Results.Ok(result);
+});
+
+// ── COMBINED RECOMMENDATION ───────────────────────────────────────────
+// Merges the live-computed technical read with whatever fundamental view is already
+// cached for this symbol (fundamental is AI-researched and rate-limited - see
+// FundamentalAnalysisService - so it may not exist yet for a symbol nobody has refreshed).
+// The combination itself is a fixed deterministic formula, not a second AI call, so the
+// result is reproducible and explainable from its own Reasons list.
+var recommendation = app.MapGroup("/api/recommendation").RequireAuthorization();
+
+recommendation.MapGet("/{symbol}", async (string symbol, PsxHistoricalPriceService priceSvc, PsxDbContext db, IHttpClientFactory httpFactory, IMemoryCache cache) =>
+{
+    var sym = symbol.Trim().ToUpperInvariant();
+    if (!IsValidSymbol(sym)) return Results.BadRequest(new { error = "Invalid symbol." });
+
+    var history = await priceSvc.GetFullHistory(sym);
+    var technicalResult = TechnicalAnalysisService.Analyze(history);
+    if (technicalResult is null) return Results.NotFound(new { error = "No price history available for this symbol." });
+
+    // Same cache entry as GET /api/prices/company/{symbol} (same cache key, same 6h TTL)
+    // - a user who already opened the Company Profile panel for this symbol gets a free
+    // cache hit here instead of a second PSX fetch.
+    var cacheKey = $"company-profile:{sym}";
+    if (!cache.TryGetValue(cacheKey, out string? profileHtml) || profileHtml is null)
+    {
+        var client = httpFactory.CreateClient();
+        client.Timeout = TimeSpan.FromSeconds(20);
+        profileHtml = await PsxHtmlFetcher.FetchAsync(client, $"company/{sym}");
+        if (profileHtml is not null) cache.Set(cacheKey, profileHtml, TimeSpan.FromHours(6));
+    }
+
+    FreeFundamentalResult? freeFundamentalResult = null;
+    if (profileHtml is not null)
+    {
+        var profile = await PsxCompanyProfileParser.ParseAsync(profileHtml);
+        if (profile is not null) freeFundamentalResult = FreeFundamentalAnalysisService.Analyze(profile);
+    }
+
+    var aiFundamentalView = await db.FundamentalViews.FirstOrDefaultAsync(f => f.Symbol == sym);
+
+    var combined = RecommendationEngine.Combine(sym, technicalResult, freeFundamentalResult, aiFundamentalView);
+    return Results.Ok(combined);
+});
+
 // ── CASH LEDGER ───────────────────────────────────────────────────────
 var cash = app.MapGroup("/api/cash").RequireAuthorization();
 

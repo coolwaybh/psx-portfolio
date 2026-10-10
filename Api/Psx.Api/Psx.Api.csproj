@@ -16,6 +16,7 @@
          within the net9.0 framework's own assembly-version family. Only loses dynamic
          filtering on the web search tool (WebSearchTool20260209 isn't in this version) -
          falls back to the basic WebSearchTool20250305, which is all this feature needs. -->
+    <PackageReference Include="AngleSharp" Version="1.8.4" />
     <PackageReference Include="Anthropic" Version="10.1.2" />
     <PackageReference Include="BCrypt.Net-Next" Version="4.0.3" />
     <PackageReference Include="PdfPig" Version="0.1.15" />

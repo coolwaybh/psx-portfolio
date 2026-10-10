@@ -540,6 +540,7 @@ a{color:var(--accent);text-decoration:none}
 .signal-badge.hold{background:rgba(146,64,14,.08);color:var(--amber);border:1px solid rgba(146,64,14,.22)}
 .signal-badge.sell{background:rgba(185,28,28,.09);color:var(--red);  border:1px solid rgba(185,28,28,.22)}
 .signal-badge.trim{background:rgba(194,65,12,.10);color:#c2410c;     border:1px solid rgba(194,65,12,.25)}
+.signal-badge.watch{background:rgba(100,116,139,.10);color:#64748b;  border:1px solid rgba(100,116,139,.25)}
 .signal-conf{display:flex;gap:2px;justify-content:center}
 .signal-conf span{width:6px;height:6px;border-radius:50%}
 .signal-conf.high  .dot1,.signal-conf.high  .dot2,.signal-conf.high  .dot3{background:currentColor}
@@ -2764,6 +2765,7 @@ async function refreshFundamentalPanel(symbol) {
     fundamentalPanelData = body;
     fundamentalPanelStatus = 'ready';
     renderFundamentalPanel();
+    loadRecommendationPanel(symbol); // combined verdict must pick up the freshly-researched view
   } catch (e) {
     if (fundamentalPanelSymbol !== symbol) return;
     toast('Fundamental analysis failed — try again shortly.', 'error', 5000);
@@ -2821,6 +2823,117 @@ function renderFundamentalPanel() {
       <div style="font-size:11px;color:var(--txt2);line-height:1.5;margin-top:6px">${escapeHtml(f.note || '')}</div>
       <div style="font-size:9px;color:var(--txt3);margin-top:3px">${confLabel[f.confidence] || ''} · AI-researched via live web search, not financial advice</div>
       ${sourcesHtml}
+    </div>`;
+}
+
+/*
+ * RECOMMENDATION — deterministic combination of the server-computed technical read
+ * (RSI/MACD/moving averages/support-resistance over EodPrice history, see
+ * Psx.Api's TechnicalAnalysisService) and whatever AI fundamental view is cached for
+ * the symbol (may be none yet - fundamentals only exist once a user has refreshed
+ * them, see loadFundamentalPanel above). Called through GET /api/recommendation/
+ * {symbol} - the combination itself is a fixed formula server-side, not a second AI
+ * call, so it's cheap enough to recompute on every open with no rate limit.
+ */
+let recommendationPanelSymbol = null;
+let recommendationPanelData = null;
+let recommendationPanelStatus = 'loading'; // 'loading' | 'ready' | 'error'
+
+async function loadRecommendationPanel(symbol) {
+  recommendationPanelSymbol = symbol;
+  recommendationPanelData = null;
+  recommendationPanelStatus = 'loading';
+  renderRecommendationPanel();
+  try {
+    const res = await fetch(`/api/recommendation/${encodeURIComponent(symbol)}`, { credentials: 'include' });
+    if (recommendationPanelSymbol !== symbol) return; // modal closed/reopened for another symbol while this was in flight
+    recommendationPanelStatus = res.ok ? 'ready' : 'error';
+    recommendationPanelData = res.ok ? await res.json() : null;
+  } catch (e) {
+    if (recommendationPanelSymbol !== symbol) return;
+    recommendationPanelStatus = 'error';
+  }
+  renderRecommendationPanel();
+}
+
+function renderRecommendationPanel() {
+  const el = document.getElementById('recommendationPanel');
+  if (!el || recommendationPanelSymbol === null) return;
+
+  if (recommendationPanelStatus === 'loading') {
+    el.innerHTML = `<div style="font-size:11px;color:var(--txt3);padding:6px 0">Computing recommendation…</div>`;
+    return;
+  }
+  if (recommendationPanelStatus === 'error' || !recommendationPanelData) {
+    el.innerHTML = `<div style="font-size:11px;color:var(--txt3);padding:6px 0">Couldn't compute a recommendation (no price history available yet for this symbol).</div>`;
+    return;
+  }
+
+  const r = recommendationPanelData;
+  const sig = (r.verdict || 'WATCH').toLowerCase();
+  const confLabel = { high: 'High confidence', medium: 'Moderate confidence', low: 'Low confidence' };
+  const ind = r.indicators || {};
+
+  const indicatorStat = (label, value) => `
+    <div class="rpnl-item">
+      <div class="rpnl-lbl">${label}</div>
+      <div class="rpnl-val mono" style="font-size:13px">${value}</div>
+    </div>`;
+
+  const indicatorsHtml = `
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px;margin-top:10px">
+      ${indicatorStat('SMA 20', ind.sma20 != null ? fPKR(ind.sma20) : '—')}
+      ${indicatorStat('SMA 50', ind.sma50 != null ? fPKR(ind.sma50) : '—')}
+      ${indicatorStat('SMA 200', ind.sma200 != null ? fPKR(ind.sma200) : '—')}
+      ${indicatorStat('RSI (14)', ind.rsi14 != null ? ind.rsi14.toFixed(1) : '—')}
+      ${indicatorStat('MACD', ind.macdLine != null ? ind.macdLine.toFixed(2) : '—')}
+      ${indicatorStat('Support', ind.support != null ? fPKR(ind.support) : '—')}
+      ${indicatorStat('Resistance', ind.resistance != null ? fPKR(ind.resistance) : '—')}
+    </div>`;
+
+  const reasonsHtml = (r.reasons || []).length ? `
+    <ul style="margin:8px 0 0;padding-left:16px;font-size:11px;color:var(--txt2);line-height:1.6">
+      ${r.reasons.map(reason => `<li>${escapeHtml(reason)}</li>`).join('')}
+    </ul>` : '';
+
+  const freeFundLine = r.freeFundamentalOutlook
+    ? `Fundamentals (free): ${r.freeFundamentalOutlook}`
+    : 'Fundamentals (free): unavailable';
+  const aiFundLine = r.aiFundamentalOutlook
+    ? `AI fundamental: ${r.aiFundamentalOutlook}`
+    : 'AI fundamental: not yet researched';
+
+  const fx = r.freeFundamentalFacts;
+  const freeFundStat = (label, value) => `
+    <div class="rpnl-item">
+      <div class="rpnl-lbl">${label}</div>
+      <div class="rpnl-val mono" style="font-size:13px">${value}</div>
+    </div>`;
+  const freeFundamentalsHtml = fx ? `
+    <div style="font-size:9px;font-weight:700;letter-spacing:.3px;color:var(--txt3);text-transform:uppercase;margin-top:12px">Free Fundamentals (PSX company data)</div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px;margin-top:6px">
+      ${freeFundStat('P/E Ratio', fx.peRatio ?? '—')}
+      ${freeFundStat('EPS Growth', fx.epsGrowthPct != null ? `${fx.epsGrowthPct}%` : '—')}
+      ${freeFundStat('Profit Growth', fx.profitGrowthPct != null ? `${fx.profitGrowthPct}%` : '—')}
+      ${freeFundStat('Sales Growth', fx.salesGrowthPct != null ? `${fx.salesGrowthPct}%` : '—')}
+      ${freeFundStat('Free Float', fx.freeFloatPct ?? '—')}
+      ${freeFundStat('1-Yr Change', fx.oneYearChangePct ?? '—')}
+    </div>` : '';
+
+  el.innerHTML = `
+    <div style="padding:9px 10px;background:var(--elevated);border-radius:var(--r);border-left:2px solid var(--border2)">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <span class="signal-badge ${sig}" style="font-size:12px;padding:3px 9px">${escapeHtml(r.verdict || '')}</span>
+        <span class="mono" style="font-size:15px;font-weight:700">${r.combinedScore}/100</span>
+      </div>
+      <div style="font-size:9px;color:var(--txt3);margin-top:4px">
+        ${confLabel[r.confidence] || ''} · Technical: ${escapeHtml(r.technicalOutlook || '')} (${r.technicalScore}) · ${freeFundLine} · ${aiFundLine}
+      </div>
+      ${reasonsHtml}
+      <div style="font-size:9px;font-weight:700;letter-spacing:.3px;color:var(--txt3);text-transform:uppercase;margin-top:12px">Technicals</div>
+      ${indicatorsHtml}
+      ${freeFundamentalsHtml}
+      <div style="font-size:9px;color:var(--txt3);margin-top:10px">Deterministic combination of price-action technicals and PSX's own reported financials - always free. The AI fundamental view below is optional, user-triggered, and the only paid/rate-limited part of this picture. Not financial advice.</div>
     </div>`;
 }
 
@@ -6014,6 +6127,7 @@ function openShareInfoModal(symbol) {
   document.getElementById('shareInfoBackdrop').classList.add('open');
   renderShareInfoModal(symbol);
   loadFundamentalPanel(symbol);
+  loadRecommendationPanel(symbol);
 }
 
 function closeShareInfoModal() {
@@ -6022,6 +6136,8 @@ function closeShareInfoModal() {
   shareInfoSymbol = null;
   fundamentalPanelSymbol = null;
   fundamentalPanelData = null;
+  recommendationPanelSymbol = null;
+  recommendationPanelData = null;
 }
 
 function setShareInfoChartRange(range) {
@@ -6109,6 +6225,10 @@ async function renderShareInfoModal(symbol) {
     </div>
     ${chartHtml}
     <div class="form-group full" style="margin-bottom:12px">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--txt3);text-transform:uppercase;margin-bottom:6px">Recommendation</div>
+      <div id="recommendationPanel"></div>
+    </div>
+    <div class="form-group full" style="margin-bottom:12px">
       <div style="font-size:11px;font-weight:700;letter-spacing:.4px;color:var(--txt3);text-transform:uppercase;margin-bottom:6px">Fundamental Analysis (AI)</div>
       <div id="fundamentalPanel"></div>
     </div>
@@ -6116,6 +6236,7 @@ async function renderShareInfoModal(symbol) {
 
   renderShareInfoChart();
   renderFundamentalPanel();
+  renderRecommendationPanel();
 }
 
 // Renders the parsed PSX company-profile DTO (see parseCompanyProfileHtml) - a
