@@ -3032,6 +3032,8 @@ let state = {
   // chart needs symbols - unlike `prices` (today's live quote), this is a full historical
   // series used to value past holdings at what they were actually worth on that date.
   priceHistory: {},
+  // Recorded daily portfolio figures from the server (see PortfolioSnapshot) - [{date, stocksValue, stocksCost, realizedCum, fundsValue, fundsCost, cash}] ascending.
+  snapshots: [],
   cash: { balance: 0, entries: [] },
   // Mutual funds - deliberately separate from transactions/cash above (no shared keys,
   // no FK link on the backend either), so a bug here can't corrupt stock data.
@@ -3129,11 +3131,73 @@ async function loadState() {
       entries: cashData.entries.map(c => ({ ...c, amount: parseFloat(c.amount) }))
     };
     state.funds = parseFundsPayload(await fundsRes.json());
+    await loadSnapshots();
   } catch(e) {
     console.warn('State load error', e);
     toast('Could not load your portfolio from the server', 'error');
   }
   return true;
+}
+
+// Recorded daily snapshots. Never allowed to break loading: if the table does not exist yet (the
+// SQL not applied) or the request fails, the chart simply keeps using its reconstructed history.
+async function loadSnapshots() {
+  try {
+    const res = await fetch('/api/snapshots', { credentials: 'include' });
+    state.snapshots = res.ok ? (await res.json()) : [];
+  } catch (e) {
+    state.snapshots = [];
+  }
+}
+
+// Posts today's real portfolio figures so the Cumulative P&L chart has an exact point for every
+// day from now on, independent of the daily-close price source. Called after a price refresh that
+// actually returned live quotes; the last post of the day is what stays (so the stored figure is the
+// closing one). Throttled and skipped when nothing changed, and never records without a price for
+// every held symbol, so a half-priced portfolio can't write a misleadingly low value.
+let lastSnapshotPostAt = 0, lastSnapshotKey = '';
+async function recordTodaySnapshot() {
+  if (Date.now() - lastSnapshotPostAt < 5 * 60 * 1000) return;
+  try {
+    const { holdings, totalMktValue, totalCostBasis } = getEnrichedHoldings();
+    if (holdings.some(h => !(state.prices[h.symbol]?.price > 0))) return;
+
+    const fundHoldings = Object.values(computeFundHoldings());
+    const fundsValue = fundHoldings.reduce((a, h) => a + h.currentValue, 0);
+    const fundsCost = fundHoldings.reduce((a, h) => a + h.totalInvested, 0);
+    if (!holdings.length && !fundHoldings.length) return;
+
+    const snaps = computeCumulativePLSnapshots();
+    const realizedCum = snaps.length ? snaps[snaps.length - 1].realizedCum : 0;
+    const payload = {
+      stocksValue: +totalMktValue.toFixed(2), stocksCost: +totalCostBasis.toFixed(2), realizedCum: +realizedCum.toFixed(2),
+      fundsValue: +fundsValue.toFixed(2), fundsCost: +fundsCost.toFixed(2), cash: +(state.cash.balance || 0).toFixed(2)
+    };
+    const key = JSON.stringify(payload);
+    if (key === lastSnapshotKey) return;
+
+    const res = await fetch('/api/snapshots/today', {
+      method: 'PUT', credentials: 'include',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
+    });
+    lastSnapshotPostAt = Date.now();
+    if (!res.ok) return;
+    lastSnapshotKey = key;
+    const saved = await res.json();
+    const i = state.snapshots.findIndex(x => x.date === saved.date);
+    if (i >= 0) state.snapshots[i] = saved; else state.snapshots.push(saved);
+  } catch (e) { /* recording is best-effort and must never disturb the page */ }
+}
+
+// Folds recorded daily snapshots into the chart's reconstructed points: on a recorded date the
+// recorded figure (realized + unrealized exactly as the app showed it that day) replaces the
+// reconstruction, and dates with no trade now get their own point - so a bad day between two
+// trades is no longer invisible.
+function mergeRecordedSnapshots(points, recorded) {
+  if (!recorded || !recorded.length) return points;
+  const byDate = new Map(points.map(p => [p.x, p.y]));
+  for (const r of recorded) byDate.set(r.date, +(r.realizedCum + r.stocksValue - r.stocksCost).toFixed(2));
+  return [...byDate.entries()].sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0).map(([x, y]) => ({ x, y }));
 }
 
 function loadPricesCache() {
@@ -3368,20 +3432,44 @@ async function loadPriceHistory(symbols) {
   }
 }
 
-// Latest cached close on or before `dateStr` for `sym` - mirrors the backend's "nearest
-// trading day on or before" rule. Falls back to today's live price (state.prices) when no
-// historical data is cached yet for this symbol (e.g. the background fetch hasn't
-// resolved), so the chart still renders something rather than a gap.
+// Most recent traded price (buy or sell) for `sym` on or before `dateStr`, expressed in
+// today-comparable per-share terms: each stock split between that trade and `dateStr`
+// scales the price down (the snapshots' share counts are rescaled by splits the same way),
+// so shares * price stays meaningful. Returns {price, date} or null if there is no trade yet.
+function lastTradePriceAsOf(sym, dateStr) {
+  const txs = state.transactions
+    .filter(t => t.symbol === sym && t.date <= dateStr)
+    .sort((a, b) => new Date(a.date) - new Date(b.date) || a.id - b.id);
+  let last = null, factor = 1;
+  for (const t of txs) {
+    if (t.type === 'split') { factor *= t.splitRatioTo / t.splitRatioFrom; continue; }
+    if (t.type === 'buy' || t.type === 'sell') { last = t; factor = 1; }
+  }
+  return last ? { price: last.price / factor, date: last.date } : null;
+}
+
+// Value per share used to price a PAST date in the Cumulative P&L / portfolio value charts.
+// Two candidates, and the one that is closer to `dateStr` wins:
+//   (a) the latest cached daily close on or before dateStr (mirrors the backend's "nearest
+//       trading day on or before" rule), and
+//   (b) the latest price this account itself traded the symbol at on or before dateStr.
+// (b) matters because the daily-close history can be missing (a recently bought symbol has
+// none) or stale (it stops at whenever the server last managed to fetch). The old code then
+// priced every past date at TODAY's live quote, so a past point showed today's loss instead
+// of that day's - the chart under- or over-stated history. Today's live quote is now only the
+// last resort, when the symbol has neither a cached close nor a trade by that date.
 function historicalPriceFor(sym, dateStr) {
+  let close = null, closeDate = null;
   const series = state.priceHistory[sym];
   if (series && series.length) {
-    let price = null;
     for (const pt of series) {
       if (pt.date > dateStr) break;
-      price = pt.close;
+      close = pt.close; closeDate = pt.date;
     }
-    if (price != null) return price;
   }
+  const trade = lastTradePriceAsOf(sym, dateStr);
+  if (close != null && (!trade || closeDate >= trade.date)) return close;
+  if (trade) return trade.price;
   return state.prices[sym]?.price ?? null;
 }
 
@@ -5299,6 +5387,7 @@ async function refreshPrices(silent = false) {
 
     savePricesCache();
     renderAll(true); // skip funds - nothing about a stock-price tick affects fund data
+    if (fetched > 0) recordTodaySnapshot();
 
     const ts = new Date().toLocaleTimeString();
     document.getElementById('lastUpdated').textContent = ts;
@@ -5700,13 +5789,14 @@ function renderCharts() {
         }
         return { x: s.date, y: +(s.realizedCum + unrealized).toFixed(2) };
       });
+      const chartPoints = mergeRecordedSnapshots(points, state.snapshots);
 
       chartInstances.cumulChart = new Chart(document.getElementById('cumulChart'), {
         type: 'line',
         data: {
-          labels: points.map(p => p.x),
+          labels: chartPoints.map(p => p.x),
           datasets: [{
-            data: points.map(p => p.y),
+            data: chartPoints.map(p => p.y),
             borderColor: '#1a56db',
             backgroundColor: 'rgba(26,86,219,.06)',
             fill: true, tension: 0.35, pointRadius: 3,

@@ -898,6 +898,50 @@ cash.MapDelete("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
 // stock side of the portfolio. Buy/Sell/Dividend amounts are always server-computed from
 // Units/Nav/FrontLoadPct/BackLoadPct (never trusted from the client), same trust boundary
 // as CashCreateRequest's dividend/CDC-hold branches above.
+// Daily portfolio snapshots - see PortfolioSnapshot. The client prices the portfolio (it holds the
+// live quotes and the cost method) and PUTs today's figures; the last write of the day wins, so the
+// stored row ends up being the latest pricing of that day. The date is the SERVER's Pakistan date, never
+// taken from the client, so a wrong device clock cannot write or overwrite another day.
+var snapshots = app.MapGroup("/api/snapshots").RequireAuthorization();
+
+snapshots.MapGet("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var rows = await db.PortfolioSnapshots
+        .Where(s => s.UserId == userId)
+        .OrderBy(s => s.SnapshotDate)
+        .ToListAsync();
+    return Results.Ok(rows.Select(SnapshotDto.From));
+});
+
+snapshots.MapPut("/today", async (SnapshotUpsertRequest req, ClaimsPrincipal principal, PsxDbContext db) =>
+{
+    var userId = principal.GetUserId();
+    var figures = new[] { req.StocksValue, req.StocksCost, req.RealizedCum, req.FundsValue, req.FundsCost, req.Cash };
+    if (figures.Any(f => f < -1_000_000_000_000m || f > 1_000_000_000_000m))
+        return Results.BadRequest(new { error = "A snapshot figure is out of range." });
+    if (req.StocksValue < 0 || req.StocksCost < 0 || req.FundsValue < 0 || req.FundsCost < 0)
+        return Results.BadRequest(new { error = "Values and costs cannot be negative." });
+
+    // Pakistan is UTC+5 all year (no daylight saving).
+    var today = DateOnly.FromDateTime(DateTime.UtcNow.AddHours(5));
+    var row = await db.PortfolioSnapshots.FirstOrDefaultAsync(s => s.UserId == userId && s.SnapshotDate == today);
+    if (row is null)
+    {
+        row = new PortfolioSnapshot { UserId = userId, SnapshotDate = today };
+        db.PortfolioSnapshots.Add(row);
+    }
+    row.StocksValue = decimal.Round(req.StocksValue, 2);
+    row.StocksCost = decimal.Round(req.StocksCost, 2);
+    row.RealizedCum = decimal.Round(req.RealizedCum, 2);
+    row.FundsValue = decimal.Round(req.FundsValue, 2);
+    row.FundsCost = decimal.Round(req.FundsCost, 2);
+    row.Cash = decimal.Round(req.Cash, 2);
+    row.UpdatedAt = DateTime.UtcNow;
+    await db.SaveChangesAsync();
+    return Results.Ok(SnapshotDto.From(row));
+});
+
 var funds = app.MapGroup("/api/funds").RequireAuthorization();
 
 funds.MapGet("/", async (ClaimsPrincipal principal, PsxDbContext db) =>
@@ -1633,6 +1677,13 @@ record FundTransactionDto(int Id, int FundId, string Type, string Date, decimal 
         t.Id, t.FundId, t.Type.ToString().ToLowerInvariant(), t.TxDate.ToString("yyyy-MM-dd"), t.Units, t.Nav, t.Amount,
         t.FrontLoadPct, t.BackLoadPct, t.Notes, t.CgtAmount
     );
+}
+
+record SnapshotUpsertRequest(decimal StocksValue, decimal StocksCost, decimal RealizedCum, decimal FundsValue, decimal FundsCost, decimal Cash);
+
+record SnapshotDto(string Date, decimal StocksValue, decimal StocksCost, decimal RealizedCum, decimal FundsValue, decimal FundsCost, decimal Cash)
+{
+    public static SnapshotDto From(PortfolioSnapshot s) => new(s.SnapshotDate.ToString("yyyy-MM-dd"), s.StocksValue, s.StocksCost, s.RealizedCum, s.FundsValue, s.FundsCost, s.Cash);
 }
 
 static class ClaimsPrincipalExtensions

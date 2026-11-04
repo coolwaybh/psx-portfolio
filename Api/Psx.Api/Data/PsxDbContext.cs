@@ -15,6 +15,7 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
     public DbSet<FundTransaction> FundTransactions => Set<FundTransaction>();
     public DbSet<FundNavHistory> FundNavHistories => Set<FundNavHistory>();
     public DbSet<MufapNav> MufapNavs => Set<MufapNav>();
+    public DbSet<PortfolioSnapshot> PortfolioSnapshots => Set<PortfolioSnapshot>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -156,6 +157,19 @@ public class PsxDbContext(DbContextOptions<PsxDbContext> options) : DbContext(op
                 .WithMany()
                 .HasForeignKey(h => h.FundId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<PortfolioSnapshot>(b =>
+        {
+            b.Property(x => x.StocksValue).HasColumnType("decimal(18,2)");
+            b.Property(x => x.StocksCost).HasColumnType("decimal(18,2)");
+            b.Property(x => x.RealizedCum).HasColumnType("decimal(18,2)");
+            b.Property(x => x.FundsValue).HasColumnType("decimal(18,2)");
+            b.Property(x => x.FundsCost).HasColumnType("decimal(18,2)");
+            b.Property(x => x.Cash).HasColumnType("decimal(18,2)");
+            b.HasIndex(x => new { x.UserId, x.SnapshotDate }).IsUnique();
+            // A single cascade path down from User (no second path to collide with).
+            b.HasOne(x => x.User).WithMany().HasForeignKey(x => x.UserId).OnDelete(DeleteBehavior.Cascade);
         });
 
         modelBuilder.Entity<MufapNav>(b =>

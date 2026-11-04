@@ -368,6 +368,49 @@ namespace Psx.Api.Migrations
                     b.ToTable("MutualFunds");
                 });
 
+            modelBuilder.Entity("Psx.Api.Entities.PortfolioSnapshot", b =>
+                {
+                    b.Property<int>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("int");
+
+                    SqlServerPropertyBuilderExtensions.UseIdentityColumn(b.Property<int>("Id"));
+
+                    b.Property<decimal>("Cash")
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal>("FundsCost")
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal>("FundsValue")
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal>("RealizedCum")
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<DateOnly>("SnapshotDate")
+                        .HasColumnType("date");
+
+                    b.Property<decimal>("StocksCost")
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal>("StocksValue")
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("UserId")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("UserId", "SnapshotDate")
+                        .IsUnique();
+
+                    b.ToTable("PortfolioSnapshots");
+                });
+
             modelBuilder.Entity("Psx.Api.Entities.User", b =>
                 {
                     b.Property<int>("Id")
@@ -503,6 +546,17 @@ namespace Psx.Api.Migrations
                 });
 
             modelBuilder.Entity("Psx.Api.Entities.MutualFund", b =>
+                {
+                    b.HasOne("Psx.Api.Entities.User", "User")
+                        .WithMany()
+                        .HasForeignKey("UserId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("User");
+                });
+
+            modelBuilder.Entity("Psx.Api.Entities.PortfolioSnapshot", b =>
                 {
                     b.HasOne("Psx.Api.Entities.User", "User")
                         .WithMany()
