@@ -1,5 +1,6 @@
 # Secrets - never commit
 deploy/*.secrets.json
+deploy/backups/
 Api/Psx.Api/appsettings.Production.json
 
 # .NET build artifacts
