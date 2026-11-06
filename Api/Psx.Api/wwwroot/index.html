@@ -1255,7 +1255,7 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
       <div class="chart-card" style="grid-column:1/-1">
         <div class="chart-title-row" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
           <div class="chart-title" style="margin-bottom:0">NAV History</div>
-          <select id="fundNavChartPicker" class="form-input" style="font-size:12px;padding:4px 8px;width:auto" onchange="renderFundNavHistoryChart()"></select>
+          <select id="fundNavChartPicker" class="form-input" style="font-size:12px;padding:4px 8px;width:auto" onchange="onFundNavPickerChange()"></select>
         </div>
         <div class="chart-body"><canvas id="fundNavHistoryChart"></canvas></div>
       </div>
@@ -1626,7 +1626,7 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
 <div id="viewCgt" style="display:none">
   <section class="section" style="padding-bottom:40px">
     <div class="section-hd">
-      <div class="section-title">Capital Gains Tax <span class="badge" id="cgtCount">0</span></div>
+      <div class="section-title">Capital Gains Tax &amp; Dividend Tax <span class="badge" id="cgtCount">0</span></div>
     </div>
     <div class="txlog-filters" style="align-items:center">
       <span style="font-size:11px;color:var(--txt3)">View period:</span>
@@ -1644,6 +1644,14 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
         <div class="rpnl-lbl">Total CGT (All Time)</div>
         <div class="rpnl-val" id="cgtAllTimeTotal">—</div>
       </div>
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Dividend Tax in Period</div>
+        <div class="rpnl-val" id="divTaxPeriodTotal">—</div>
+      </div>
+      <div class="rpnl-item">
+        <div class="rpnl-lbl">Total Dividend Tax (All Time)</div>
+        <div class="rpnl-val" id="divTaxAllTimeTotal">—</div>
+      </div>
     </div>
     <div class="tbl-wrap">
       <table class="tbl">
@@ -1652,7 +1660,7 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
             <th style="text-align:left">Date</th>
             <th style="text-align:left">Type</th>
             <th style="text-align:left">Symbol / Fund</th>
-            <th>CGT Withheld</th>
+            <th>Tax Withheld</th>
             <th style="text-align:left">Notes</th>
           </tr>
         </thead>
@@ -6583,7 +6591,16 @@ function computeCgtLedger() {
       return { id: `fund-${t.id}`, date: t.date, type: 'Fund', label: fund ? fund.name : '—', cgtAmount: t.cgtAmount, notes: t.notes || '' };
     });
 
-  return [...fromStocks, ...fromFunds];
+  // Withholding tax on cash dividends is stored on the dividend entry itself (gross - net), not in
+  // cgtAmount, so it never showed up here. Listed as its own "Dividend Tax" type and totalled
+  // separately - it is income tax on a dividend, not capital gains tax, so it must not inflate
+  // the CGT totals.
+  const fromDividends = state.cash.entries
+    .filter(c => c.type === 'dividend' && c.grossAmount != null && (c.grossAmount - c.amount) > 0.005)
+    .map(c => ({ id: `div-${c.id}`, date: c.date, type: 'Dividend Tax', label: c.symbol || '—', cgtAmount: c.grossAmount - c.amount, isDividendTax: true,
+                 notes: `Gross ${fPKR(c.grossAmount)} @ ${fPct(c.taxRatePct || 0)}${c.notes ? ' · ' + c.notes : ''}` }));
+
+  return [...fromStocks, ...fromFunds, ...fromDividends];
 }
 
 function clearCgtDateFilter() {
@@ -6600,7 +6617,7 @@ function renderCgtLedger() {
   const summaryEl = document.getElementById('cgtLedgerSummary');
   if (!tbody) return; // view not in the DOM yet on first paint before init() finishes
   if (all.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No CGT withheld yet — it shows up here automatically the moment a stock or fund sell records one</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No tax withheld yet — it shows up here automatically when a stock or fund sell records CGT, or a cash dividend records withholding tax</div></td></tr>`;
     if (summaryEl) summaryEl.style.display = 'none';
     return;
   }
@@ -6610,10 +6627,12 @@ function renderCgtLedger() {
   const toVal   = document.getElementById('cgtFilterTo')?.value || '';
   const inPeriod = all.filter(c => (!fromVal || c.date >= fromVal) && (!toVal || c.date <= toVal));
 
-  const allTimeTotal = all.reduce((sum, c) => sum + c.cgtAmount, 0);
-  const periodTotal = inPeriod.reduce((sum, c) => sum + c.cgtAmount, 0);
+  const allTimeTotal = all.filter(c => !c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0);
+  const periodTotal = inPeriod.filter(c => !c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0);
   document.getElementById('cgtAllTimeTotal').textContent = fPKR(allTimeTotal);
   document.getElementById('cgtPeriodTotal').textContent = fPKR(periodTotal);
+  document.getElementById('divTaxAllTimeTotal').textContent = fPKR(all.filter(c => c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0));
+  document.getElementById('divTaxPeriodTotal').textContent = fPKR(inPeriod.filter(c => c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0));
 
   if (inPeriod.length === 0) {
     tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No CGT withheld in this date range</div></td></tr>`;
@@ -8798,6 +8817,12 @@ function renderFundCharts(holdings, totalValue) {
 
 let fundNavChartFundId = null;
 
+function onFundNavPickerChange() {
+  const id = parseInt(document.getElementById('fundNavChartPicker').value, 10);
+  if (!Number.isNaN(id)) fundNavChartFundId = id;
+  renderFundNavHistoryChart();
+}
+
 // NAV history for one selected fund, with buy/sell markers overlaid at their actual
 // transaction dates. No annotation plugin is loaded (this app deliberately stays on the
 // single Chart.js CDN script - see the plan), so markers are a second/third dataset on
@@ -8816,8 +8841,11 @@ function renderFundNavHistoryChart() {
   if (fundNavChartFundId == null || !funds.some(f => f.id === fundNavChartFundId)) {
     fundNavChartFundId = funds[0].id;
   }
+  // The dropdown is rebuilt from fundNavChartFundId on every render, so the chosen fund must be
+  // stored BEFORE a render (see onFundNavPickerChange). Reading picker.value back here instead
+  // used to throw the user's pick away - the rebuild re-selected the old fund every time, so
+  // only the first fund's history could ever be shown.
   picker.innerHTML = funds.map(f => `<option value="${f.id}" ${f.id === fundNavChartFundId ? 'selected' : ''}>${escapeHtml(f.name)}</option>`).join('');
-  fundNavChartFundId = parseInt(picker.value, 10);
 
   destroyChart('fundNavHistoryChart');
   const history = [...(state.funds.navHistory[fundNavChartFundId] || [])].sort((a, b) => new Date(a.date) - new Date(b.date));
