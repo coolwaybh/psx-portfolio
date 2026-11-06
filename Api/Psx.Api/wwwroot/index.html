@@ -1626,7 +1626,7 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
 <div id="viewCgt" style="display:none">
   <section class="section" style="padding-bottom:40px">
     <div class="section-hd">
-      <div class="section-title">Capital Gains Tax &amp; Dividend Tax <span class="badge" id="cgtCount">0</span></div>
+      <div class="section-title">Capital Gains Tax <span class="badge" id="cgtCount">0</span></div>
     </div>
     <div class="txlog-filters" style="align-items:center">
       <span style="font-size:11px;color:var(--txt3)">View period:</span>
@@ -1634,33 +1634,34 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
       <span style="font-size:11px;color:var(--txt3)">to</span>
       <input type="date" id="cgtFilterTo" class="form-input" style="font-size:12px;padding:4px 8px" onchange="renderCgtLedger()">
       <button class="btn btn-sm" onclick="clearCgtDateFilter()">Clear</button>
+      <span style="font-size:11px;color:var(--txt3);margin-left:10px">Category:</span>
+      <select id="cgtFilterCat" class="form-input" style="font-size:12px;padding:4px 8px;width:auto" onchange="renderCgtLedger()">
+        <option value="">All</option>
+        <option value="shares">CGT paid on Shares Sell</option>
+        <option value="dividends">CGT paid on Dividends</option>
+        <option value="funds">CGT paid on Fund Sells</option>
+      </select>
     </div>
-    <div class="rpnl-summary" id="cgtLedgerSummary">
-      <div class="rpnl-item">
-        <div class="rpnl-lbl">CGT in Period</div>
-        <div class="rpnl-val" id="cgtPeriodTotal">—</div>
-      </div>
-      <div class="rpnl-item">
-        <div class="rpnl-lbl">Total CGT (All Time)</div>
-        <div class="rpnl-val" id="cgtAllTimeTotal">—</div>
-      </div>
-      <div class="rpnl-item">
-        <div class="rpnl-lbl">Dividend Tax in Period</div>
-        <div class="rpnl-val" id="divTaxPeriodTotal">—</div>
-      </div>
-      <div class="rpnl-item">
-        <div class="rpnl-lbl">Total Dividend Tax (All Time)</div>
-        <div class="rpnl-val" id="divTaxAllTimeTotal">—</div>
-      </div>
+    <div class="tbl-wrap" id="cgtLedgerSummary" style="margin-bottom:14px">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="text-align:left">Category</th>
+            <th>In Selected Period</th>
+            <th>All Time</th>
+          </tr>
+        </thead>
+        <tbody id="cgtSummaryBody"></tbody>
+      </table>
     </div>
     <div class="tbl-wrap">
       <table class="tbl">
         <thead>
           <tr>
             <th style="text-align:left">Date</th>
-            <th style="text-align:left">Type</th>
+            <th style="text-align:left">Category</th>
             <th style="text-align:left">Symbol / Fund</th>
-            <th>Tax Withheld</th>
+            <th>CGT Paid</th>
             <th style="text-align:left">Notes</th>
           </tr>
         </thead>
@@ -6573,34 +6574,38 @@ function renderCashLedger() {
 
 /* ══════════════════════════════════════════════════════
    RENDER — CGT LEDGER
-   Combines both places CGT already gets recorded - CashEntry.cgtAmount (stock sells,
-   see POST /api/ledger) and FundTransaction.cgtAmount (fund sells, see POST
-   /api/funds/transactions/sell) - into one dated ledger. Read-only aggregation of data
-   that already exists; no separate CGT table or endpoint, same reasoning as
-   renderOverviewView() combining stocks+funds from data already in `state`.
+   Combines every place CGT already gets recorded into one dated ledger, grouped by nature:
+     shares    - CashEntry.cgtAmount on a stock sell (POST /api/ledger)
+     dividends - withholding tax on a cash dividend: stored on the dividend entry as gross - net
+                 (never in cgtAmount), so it is derived here
+     funds     - FundTransaction.cgtAmount on a fund sell (POST /api/funds/transactions/sell)
+   Read-only aggregation of data that already exists; no separate CGT table or endpoint, same
+   reasoning as renderOverviewView() combining stocks+funds from data already in `state`.
 ══════════════════════════════════════════════════════ */
+const CGT_CATEGORIES = [
+  { key: 'shares',    label: 'CGT paid on Shares Sell', badge: 'SHARES SELL' },
+  { key: 'dividends', label: 'CGT paid on Dividends',   badge: 'DIVIDEND' },
+  { key: 'funds',     label: 'CGT paid on Fund Sells',  badge: 'FUND SELL' }
+];
+
 function computeCgtLedger() {
   const fromStocks = state.cash.entries
     .filter(c => c.cgtAmount != null && c.cgtAmount > 0)
-    .map(c => ({ id: `cash-${c.id}`, date: c.date, type: 'Stock', label: c.symbol || '—', cgtAmount: c.cgtAmount, notes: c.notes || '' }));
+    .map(c => ({ id: `cash-${c.id}`, date: c.date, cat: 'shares', label: c.symbol || '—', cgtAmount: c.cgtAmount, notes: c.notes || '' }));
+
+  const fromDividends = state.cash.entries
+    .filter(c => c.type === 'dividend' && c.grossAmount != null && (c.grossAmount - c.amount) > 0.005)
+    .map(c => ({ id: `div-${c.id}`, date: c.date, cat: 'dividends', label: c.symbol || '—', cgtAmount: c.grossAmount - c.amount,
+                 notes: `Gross ${fPKR(c.grossAmount)} @ ${fPct(c.taxRatePct || 0)}${c.notes ? ' · ' + c.notes : ''}` }));
 
   const fromFunds = state.funds.transactions
     .filter(t => t.cgtAmount != null && t.cgtAmount > 0)
     .map(t => {
       const fund = state.funds.funds.find(f => f.id === t.fundId);
-      return { id: `fund-${t.id}`, date: t.date, type: 'Fund', label: fund ? fund.name : '—', cgtAmount: t.cgtAmount, notes: t.notes || '' };
+      return { id: `fund-${t.id}`, date: t.date, cat: 'funds', label: fund ? fund.name : '—', cgtAmount: t.cgtAmount, notes: t.notes || '' };
     });
 
-  // Withholding tax on cash dividends is stored on the dividend entry itself (gross - net), not in
-  // cgtAmount, so it never showed up here. Listed as its own "Dividend Tax" type and totalled
-  // separately - it is income tax on a dividend, not capital gains tax, so it must not inflate
-  // the CGT totals.
-  const fromDividends = state.cash.entries
-    .filter(c => c.type === 'dividend' && c.grossAmount != null && (c.grossAmount - c.amount) > 0.005)
-    .map(c => ({ id: `div-${c.id}`, date: c.date, type: 'Dividend Tax', label: c.symbol || '—', cgtAmount: c.grossAmount - c.amount, isDividendTax: true,
-                 notes: `Gross ${fPKR(c.grossAmount)} @ ${fPct(c.taxRatePct || 0)}${c.notes ? ' · ' + c.notes : ''}` }));
-
-  return [...fromStocks, ...fromFunds, ...fromDividends];
+  return [...fromStocks, ...fromDividends, ...fromFunds];
 }
 
 function clearCgtDateFilter() {
@@ -6617,7 +6622,7 @@ function renderCgtLedger() {
   const summaryEl = document.getElementById('cgtLedgerSummary');
   if (!tbody) return; // view not in the DOM yet on first paint before init() finishes
   if (all.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No tax withheld yet — it shows up here automatically when a stock or fund sell records CGT, or a cash dividend records withholding tax</div></td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No CGT paid yet — it shows up here automatically when a share or fund sell records CGT, or a cash dividend records withholding tax</div></td></tr>`;
     if (summaryEl) summaryEl.style.display = 'none';
     return;
   }
@@ -6625,27 +6630,39 @@ function renderCgtLedger() {
 
   const fromVal = document.getElementById('cgtFilterFrom')?.value || '';
   const toVal   = document.getElementById('cgtFilterTo')?.value || '';
+  const catVal  = document.getElementById('cgtFilterCat')?.value || '';
   const inPeriod = all.filter(c => (!fromVal || c.date >= fromVal) && (!toVal || c.date <= toVal));
 
-  const allTimeTotal = all.filter(c => !c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0);
-  const periodTotal = inPeriod.filter(c => !c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0);
-  document.getElementById('cgtAllTimeTotal').textContent = fPKR(allTimeTotal);
-  document.getElementById('cgtPeriodTotal').textContent = fPKR(periodTotal);
-  document.getElementById('divTaxAllTimeTotal').textContent = fPKR(all.filter(c => c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0));
-  document.getElementById('divTaxPeriodTotal').textContent = fPKR(inPeriod.filter(c => c.isDividendTax).reduce((sum, c) => sum + c.cgtAmount, 0));
+  // Summary: one row per category plus the combined total. It follows the date range but NOT the
+  // category filter, so the total always adds up what the rows above it show.
+  const sum = (rows, key) => rows.filter(c => !key || c.cat === key).reduce((t, c) => t + c.cgtAmount, 0);
+  const catRows = CGT_CATEGORIES
+    .filter(cat => cat.key !== 'funds' || all.some(c => c.cat === 'funds')) // don't show a fund line to someone with no fund CGT
+    .map(cat => `<tr>
+      <td style="text-align:left">${cat.label}</td>
+      <td class="val-neg">${fPKR(sum(inPeriod, cat.key))}</td>
+      <td class="val-neg">${fPKR(sum(all, cat.key))}</td>
+    </tr>`).join('');
+  document.getElementById('cgtSummaryBody').innerHTML = catRows + `<tr style="font-weight:700;border-top:2px solid var(--border, #cbd5e1)">
+      <td style="text-align:left">Total CGT (all categories)</td>
+      <td class="val-neg">${fPKR(sum(inPeriod))}</td>
+      <td class="val-neg">${fPKR(sum(all))}</td>
+    </tr>`;
 
-  if (inPeriod.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No CGT withheld in this date range</div></td></tr>`;
+  const shown = inPeriod.filter(c => !catVal || c.cat === catVal);
+  if (shown.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5"><div class="no-data">No CGT paid in this date range${catVal ? ' for this category' : ''}</div></td></tr>`;
     return;
   }
 
-  const newestFirst = [...inPeriod].sort((a,b) => new Date(b.date) - new Date(a.date) || String(b.id).localeCompare(String(a.id)));
+  const newestFirst = [...shown].sort((a,b) => new Date(b.date) - new Date(a.date) || String(b.id).localeCompare(String(a.id)));
   const showAll = state.ui.showAllCgt;
   const displayed = showAll ? newestFirst : newestFirst.slice(0, ROW_LIMIT);
+  const badgeOf = key => CGT_CATEGORIES.find(c => c.key === key)?.badge || key.toUpperCase();
 
   tbody.innerHTML = displayed.map(c => `<tr>
     <td style="text-align:left;font-family:var(--mono)">${c.date}</td>
-    <td style="text-align:left"><span class="tx-type sell">${c.type.toUpperCase()}</span></td>
+    <td style="text-align:left"><span class="tx-type sell">${badgeOf(c.cat)}</span></td>
     <td style="text-align:left"><span class="sym">${escapeHtml(c.label)}</span></td>
     <td class="val-neg">${fPKR(c.cgtAmount)}</td>
     <td style="color:var(--txt3);font-size:11px;text-align:left;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(c.notes)||'—'}</td>
