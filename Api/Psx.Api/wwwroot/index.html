@@ -907,6 +907,15 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
               <option>Sugar</option>
               <option>Chemical</option>
               <option>Food</option>
+              <option>Transport</option>
+              <option>Cable &amp; Electrical</option>
+              <option>Paper &amp; Packaging</option>
+              <option>Glass &amp; Ceramics</option>
+              <option>Leather</option>
+              <option>Tobacco</option>
+              <option>Real Estate</option>
+              <option>Modarabas &amp; Leasing</option>
+              <option>ETFs &amp; Funds</option>
               <option>Other</option>
             </select>
           </div>
@@ -1727,6 +1736,15 @@ tr.asOfAddRow td{border-top:1px dashed var(--border)}
             <option>Sugar</option>
             <option>Chemical</option>
             <option>Food</option>
+            <option>Transport</option>
+            <option>Cable &amp; Electrical</option>
+            <option>Paper &amp; Packaging</option>
+            <option>Glass &amp; Ceramics</option>
+            <option>Leather</option>
+            <option>Tobacco</option>
+            <option>Real Estate</option>
+            <option>Modarabas &amp; Leasing</option>
+            <option>ETFs &amp; Funds</option>
             <option>Other</option>
           </select>
           <span class="form-error" id="errSector"></span>
@@ -3251,7 +3269,7 @@ function computeHoldingsWA() {
 
     if (tx.type === 'buy') {
       if (!holdings[sym]) {
-        holdings[sym] = { shares:0, totalCost:0, sector:tx.sector, symbol:sym };
+        holdings[sym] = { shares:0, totalCost:0, sector:effectiveSector(sym, tx.sector), symbol:sym };
       }
       holdings[sym].totalCost += tx.shares * tx.price + comm;
       holdings[sym].shares += tx.shares;
@@ -3304,7 +3322,7 @@ function computeHoldingsFIFO() {
       lots[sym].push({ shares: tx.shares, costPerShare });
 
       if (!holdings[sym]) {
-        holdings[sym] = { shares:0, totalCost:0, sector:tx.sector, symbol:sym };
+        holdings[sym] = { shares:0, totalCost:0, sector:effectiveSector(sym, tx.sector), symbol:sym };
       }
       holdings[sym].shares += tx.shares;
       holdings[sym].totalCost += tx.shares * costPerShare;
@@ -3391,7 +3409,7 @@ function computeHoldingsAsOf(cutoffDate) {
       }
       continue;
     }
-    if (!holdings[sym]) holdings[sym] = { shares: 0, sector: tx.sector, symbol: sym };
+    if (!holdings[sym]) holdings[sym] = { shares: 0, sector: effectiveSector(sym, tx.sector), symbol: sym };
     if (tx.type === 'buy') holdings[sym].shares += tx.shares;
     else if (tx.type === 'sell') holdings[sym].shares -= tx.shares;
   }
@@ -5166,6 +5184,17 @@ const PSX_SECTOR_MAP = [
   [['SUGAR'], 'Sugar'],
   [['CHEMICAL'], 'Chemical'],
   [['FOOD', 'VANASPATI'], 'Food'],
+  // Added so these PSX sectors no longer fall into "Other" - keep in sync with the options in the
+  // Sector <select>s and with PsxSymbolDirectory.SectorMap on the server (used for PDF imports).
+  [['TRANSPORT'], 'Transport'],
+  [['CABLE'], 'Cable & Electrical'],
+  [['PAPER'], 'Paper & Packaging'],
+  [['GLASS'], 'Glass & Ceramics'],
+  [['LEATHER'], 'Leather'],
+  [['TOBACCO'], 'Tobacco'],
+  [['PROPERTY', 'REAL ESTATE'], 'Real Estate'],
+  [['MODARABA', 'LEASING'], 'Modarabas & Leasing'],
+  [['EXCHANGE TRADED', 'MUTUAL FUND'], 'ETFs & Funds'],
 ];
 
 function mapPsxSectorToAppSector(sectorName) {
@@ -5174,6 +5203,27 @@ function mapPsxSectorToAppSector(sectorName) {
     if (keys.some(k => s.includes(k))) return sector;
   }
   return 'Other';
+}
+
+// A transaction stores the sector it was entered with, so anything saved as "Other" (or blank)
+// before a sector existed keeps showing "Other" forever. For display and holdings grouping, a
+// stored "Other"/blank is replaced by the PSX directory's sector for that symbol when there is a
+// real one - never overriding a sector the user actually chose, and never rewriting saved data.
+// Falls back to the built-in directory because the first render happens before loadPsxSymbols().
+let _fallbackSectorBySymbol = null;
+function effectiveSector(symbol, stored) {
+  if (stored && stored !== 'Other') return stored;
+  const sym = (symbol || '').toUpperCase();
+  let mapped = psxSymbolsMap[sym]?.sector;
+  if (!mapped) {
+    if (!_fallbackSectorBySymbol) {
+      _fallbackSectorBySymbol = {};
+      for (const [symbol2, , sectorName] of PSX_SYMBOLS_FALLBACK)
+        _fallbackSectorBySymbol[symbol2.toUpperCase()] = mapPsxSectorToAppSector(sectorName);
+    }
+    mapped = _fallbackSectorBySymbol[sym];
+  }
+  return (mapped && mapped !== 'Other') ? mapped : (stored || '');
 }
 
 function applySymbolList(list) {
@@ -6099,7 +6149,7 @@ function renderTransactionLog() {
         <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
         <td style="text-align:left"><span class="tx-type split">SPLIT</span></td>
         <td style="text-align:left"><span class="sym">${escapeHtml(tx.symbol)}</span></td>
-        <td style="text-align:left"><span class="sector-tag">${escapeHtml(tx.sector)||'—'}</span></td>
+        <td style="text-align:left"><span class="sector-tag">${escapeHtml(effectiveSector(tx.symbol, tx.sector))||'—'}</span></td>
         <td>${fNum(tx.splitRatioTo)}:${fNum(tx.splitRatioFrom)}</td>
         <td>—</td>
         <td>—</td>
@@ -6116,7 +6166,7 @@ function renderTransactionLog() {
       <td style="text-align:left;font-family:var(--mono)">${tx.date}</td>
       <td style="text-align:left"><span class="tx-type ${tx.type}">${tx.type.toUpperCase()}</span></td>
       <td style="text-align:left"><span class="sym">${escapeHtml(tx.symbol)}</span></td>
-      <td style="text-align:left"><span class="sector-tag">${escapeHtml(tx.sector)||'—'}</span></td>
+      <td style="text-align:left"><span class="sector-tag">${escapeHtml(effectiveSector(tx.symbol, tx.sector))||'—'}</span></td>
       <td>${fNum(tx.shares)}</td>
       <td>${fPKR(tx.price)}</td>
       <td>${fPKR(tx.commission)}</td>

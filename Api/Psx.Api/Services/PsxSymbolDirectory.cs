@@ -37,6 +37,16 @@ public class PsxSymbolDirectory
         (["SUGAR"], "Sugar"),
         (["CHEMICAL"], "Chemical"),
         (["FOOD", "VANASPATI"], "Food"),
+        // Keep in sync with index.html's PSX_SECTOR_MAP and the Sector <select> options.
+        (["TRANSPORT"], "Transport"),
+        (["CABLE"], "Cable & Electrical"),
+        (["PAPER"], "Paper & Packaging"),
+        (["GLASS"], "Glass & Ceramics"),
+        (["LEATHER"], "Leather"),
+        (["TOBACCO"], "Tobacco"),
+        (["PROPERTY", "REAL ESTATE"], "Real Estate"),
+        (["MODARABA", "LEASING"], "Modarabas & Leasing"),
+        (["EXCHANGE TRADED", "MUTUAL FUND"], "ETFs & Funds"),
     ];
 
     // Whole-word corporate-suffix/noise tokens stripped before comparing names. No
